@@ -1,0 +1,92 @@
+# Crypto RL Trading System - Default Configuration
+
+exchange:
+  name: bybit
+  testnet: true
+  rate_limit_per_second: 10.0
+
+pairs:
+  pairs:
+    - SUI/USDT:USDT
+    - SOL/USDT:USDT
+    - LINK/USDT:USDT
+    - BNB/USDT:USDT
+  default_pair: SOL/USDT:USDT
+
+timeframes:
+  ltf: 15m
+  htf: 1h
+
+fees:
+  use_dynamic_fees: true
+  default_taker_fee: 0.00055
+  default_maker_fee: 0.0002
+  fee_cache_ttl_seconds: 3600
+
+risk:
+  max_position_pct: 1.0
+  max_leverage: 5
+  daily_loss_limit_pct: 0.10
+  default_sl_pct: 0.02
+  default_tp_pct: 0.04
+  tight_sl_pct: 0.01
+  tight_tp_pct: 0.015
+
+indicators:
+  # Pivot detection
+  pivot_left_bars: 4
+  pivot_right_bars: 3
+  use_high_low: true
+
+  # Trend filter
+  trend_method: HMA
+  trend_length: 14
+  kalman_short_len: 18
+  kalman_long_len: 23
+
+  # Momentum
+  breakout_lookback: 40
+  breakout_vol_multiplier: 1.1
+  velocity_threshold: 3.5
+  velocity_bars: 3
+  atr_length: 14
+
+  # RSI/MFI
+  rsi_length: 14
+  mfi_length: 14
+  rsi_oversold: 30.0
+  rsi_overbought: 70.0
+
+  # MACD
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+  # Bollinger Bands
+  bb_length: 20
+  bb_mult: 2.0
+
+training:
+  total_timesteps: 1000000
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  window_size: 30
+  episode_max_steps: 2000
+  checkpoint_freq: 50000
+  eval_freq: 10000
+  seed: 42
+
+data:
+  data_dir: data
+  raw_dir: data/raw
+  processed_dir: data/processed
+  compression: snappy
+  min_bars: 10000
