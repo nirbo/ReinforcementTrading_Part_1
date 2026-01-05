@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -55,7 +55,7 @@ class TradingMetricsCallback(BaseCallback):
                 obs, reward, terminated, truncated, info = self.eval_env.step(action)
                 done = terminated or truncated
 
-            stats = self.eval_env.get_trade_stats()
+            stats = self.eval_env.unwrapped.get_trade_stats()
 
             # Log to TensorBoard
             self.logger.record("eval/n_trades", stats["n_trades"])
@@ -105,7 +105,7 @@ def train_ppo(
     htf_train_df: Optional[pd.DataFrame] = None,
     htf_val_df: Optional[pd.DataFrame] = None,
     resume_path: Optional[str] = None,
-) -> PPO:
+) -> Tuple[PPO, Dict[str, Any]]:
     """
     Train PPO agent on crypto trading environment.
 
@@ -119,7 +119,7 @@ def train_ppo(
         resume_path: Path to resume training from
 
     Returns:
-        Trained PPO model
+        Tuple of (Trained PPO model, final validation stats)
     """
     config = config or load_config()
     training = config.training
@@ -219,7 +219,7 @@ def train_ppo(
         obs, reward, terminated, truncated, info = val_env.step(action)
         done = terminated or truncated
 
-    final_stats = val_env.get_trade_stats()
+    final_stats = val_env.unwrapped.get_trade_stats()
     logger.info(f"Final stats: {final_stats}")
 
     # Save stats
@@ -227,7 +227,7 @@ def train_ppo(
     with open(run_dir / "final_stats.json", "w") as f:
         json.dump(final_stats, f, indent=2, default=str)
 
-    return model
+    return model, final_stats
 
 
 def evaluate_model(
