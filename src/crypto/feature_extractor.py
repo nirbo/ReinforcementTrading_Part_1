@@ -75,18 +75,47 @@ FEATURE_SPECS: List[FeatureSpec] = [
     FeatureSpec("breakout_short", 0.0, 1.0),
     FeatureSpec("velocity_long", 0.0, 1.0),
     FeatureSpec("velocity_short", 0.0, 1.0),
-    FeatureSpec("atr_expansion", 0.0, 1.0),
+    FeatureSpec("atr_exp_bull", 0.0, 1.0),
+    FeatureSpec("atr_exp_bear", 0.0, 1.0),
     FeatureSpec("mfi", 0.0, 100.0),
     FeatureSpec("mfi_normalized", -1.0, 1.0),
+    # MFI momentum signal (original sr_swing lines 1457-1466)
+    FeatureSpec("mfi_momentum_bull", 0.0, 1.0),   # MFI > threshold AND rising
+    FeatureSpec("mfi_momentum_bear", 0.0, 1.0),   # MFI < threshold AND falling
 
-    # Filter features
-    FeatureSpec("rsi_oversold", 0.0, 1.0),
-    FeatureSpec("rsi_overbought", 0.0, 1.0),
+    # Filter features - RSI modes (original sr_swing lines 1521-1535)
+    FeatureSpec("rsi_oversold", 0.0, 1.0),           # Avoid Extremes: block long if overbought
+    FeatureSpec("rsi_overbought", 0.0, 1.0),         # Avoid Extremes: block short if oversold
+    FeatureSpec("rsi_momentum_long", 0.0, 1.0),     # Momentum Aligned: RSI > 50 for longs
+    FeatureSpec("rsi_momentum_short", 0.0, 1.0),    # Momentum Aligned: RSI < 50 for shorts
+    FeatureSpec("rsi_bounce_long", 0.0, 1.0),       # Counter-Trend Bounce: RSI <= oversold for longs
+    FeatureSpec("rsi_bounce_short", 0.0, 1.0),      # Counter-Trend Bounce: RSI >= overbought for shorts
     FeatureSpec("macd_bullish", 0.0, 1.0),
     FeatureSpec("macd_bearish", 0.0, 1.0),
     FeatureSpec("macd_histogram_norm", -1.0, 1.0),
+    # MACD entry modes (original sr_swing lines 1540-1554)
+    FeatureSpec("macd_above_zero", 0.0, 1.0),       # Above Zero Line mode
+    FeatureSpec("macd_below_zero", 0.0, 1.0),       # Below Zero Line mode
+    FeatureSpec("macd_cross_bull", 0.0, 1.0),       # Signal Cross: MACD crosses above signal
+    FeatureSpec("macd_cross_bear", 0.0, 1.0),       # Signal Cross: MACD crosses below signal
+    # Zero Lag Score features (original sr_swing lines 1386-1392, 1556-1566)
+    FeatureSpec("zl_score_norm", -1.0, 1.0),       # Normalized ZL score
+    FeatureSpec("zl_rising", 0.0, 1.0),            # ZL EMA rising
+    FeatureSpec("zl_falling", 0.0, 1.0),           # ZL EMA falling
+    FeatureSpec("zl_score_bull", 0.0, 1.0),        # Score Only mode: score > threshold_up
+    FeatureSpec("zl_score_bear", 0.0, 1.0),        # Score Only mode: score < threshold_down
     FeatureSpec("bb_position", 0.0, 1.0),
     FeatureSpec("bb_squeeze", 0.0, 1.0),
+    # BB squeeze breakout signals (original sr_swing lines 1469-1473)
+    FeatureSpec("bb_squeeze_breakout_bull", 0.0, 1.0),  # Was in squeeze, now above upper
+    FeatureSpec("bb_squeeze_breakout_bear", 0.0, 1.0),  # Was in squeeze, now below lower
+    # MTF strict mode features (original sr_swing lines 1498-1504)
+    FeatureSpec("htf_rising", 0.0, 1.0),              # HTF trend rising
+    FeatureSpec("htf_falling", 0.0, 1.0),             # HTF trend falling
+    FeatureSpec("mtf_strict_bullish", 0.0, 1.0),      # Strict mode: htf_rising only
+    FeatureSpec("mtf_strict_bearish", 0.0, 1.0),      # Strict mode: htf_falling only
+    FeatureSpec("mtf_relaxed_bullish", 0.0, 1.0),     # Relaxed: htf_rising OR not htf_falling
+    FeatureSpec("mtf_relaxed_bearish", 0.0, 1.0),     # Relaxed: htf_falling OR not htf_rising
 
     # Position state (added dynamically)
     FeatureSpec("position_direction", -1.0, 1.0),
@@ -210,15 +239,36 @@ class FeatureExtractor:
         features["breakout_short"] = df["breakout_short"].astype(float)
         features["velocity_long"] = df["velocity_long"].astype(float)
         features["velocity_short"] = df["velocity_short"].astype(float)
-        features["atr_expansion"] = df["atr_expansion"].astype(float)
+        features["atr_exp_bull"] = df["atr_exp_bull"].astype(float)
+        features["atr_exp_bear"] = df["atr_exp_bear"].astype(float)
         features["mfi"] = df["mfi"].clip(0, 100) / 100
         features["mfi_normalized"] = ((df["mfi"] - 50) / 50).clip(-1, 1)
 
+        # MFI momentum signal (original sr_swing lines 1457-1466)
+        mfi_threshold = self.config.indicators.mfi_momentum_threshold
+        mfi_rising = df["mfi"].diff() > 0
+        mfi_falling = df["mfi"].diff() < 0
+        features["mfi_momentum_bull"] = ((df["mfi"] > mfi_threshold) & mfi_rising).astype(float)
+        features["mfi_momentum_bear"] = ((df["mfi"] < mfi_threshold) & mfi_falling).astype(float)
+
         # ===== FILTER FEATURES =====
+        # RSI filter modes (original sr_swing lines 1521-1535)
         rsi_oversold = self.config.indicators.rsi_oversold
         rsi_overbought = self.config.indicators.rsi_overbought
+
+        # Avoid Extremes mode: block entry if at extremes
         features["rsi_oversold"] = (df["rsi"] < rsi_oversold).astype(float)
         features["rsi_overbought"] = (df["rsi"] > rsi_overbought).astype(float)
+
+        # Momentum Aligned mode: RSI must confirm direction
+        features["rsi_momentum_long"] = (df["rsi"] > 50).astype(float)
+        features["rsi_momentum_short"] = (df["rsi"] < 50).astype(float)
+
+        # Counter-Trend Bounce mode: enter on extreme reversals
+        features["rsi_bounce_long"] = (df["rsi"] <= rsi_oversold).astype(float)
+        features["rsi_bounce_short"] = (df["rsi"] >= rsi_overbought).astype(float)
+
+        # MACD features (original sr_swing lines 1540-1554)
         features["macd_bullish"] = (df["macd_histogram"] > 0).astype(float)
         features["macd_bearish"] = (df["macd_histogram"] < 0).astype(float)
 
@@ -226,11 +276,38 @@ class FeatureExtractor:
         macd_range = df["macd_histogram"].rolling(window=50).apply(lambda x: x.max() - x.min(), raw=True)
         features["macd_histogram_norm"] = (df["macd_histogram"] / macd_range.replace(0, np.nan)).clip(-1, 1).fillna(0)
 
+        # MACD Zero Line position modes
+        features["macd_above_zero"] = (df["macd"] > 0).astype(float)
+        features["macd_below_zero"] = (df["macd"] < 0).astype(float)
+
+        # MACD Signal Cross detection
+        macd_above_signal = df["macd"] > df["macd_signal"]
+        macd_above_signal_prev = macd_above_signal.shift(1).fillna(False)
+        features["macd_cross_bull"] = (macd_above_signal & ~macd_above_signal_prev).astype(float)
+        features["macd_cross_bear"] = (~macd_above_signal & macd_above_signal_prev).astype(float)
+
+        # Zero Lag Score features (original sr_swing lines 1386-1392, 1556-1566)
+        zl_threshold_up = self.config.indicators.zl_threshold_up
+        zl_threshold_down = self.config.indicators.zl_threshold_down
+        features["zl_score_norm"] = df["zl_score"].clip(-1, 1)  # Score is typically -1 to 1
+        features["zl_rising"] = df["zl_rising"]
+        features["zl_falling"] = df["zl_falling"]
+        features["zl_score_bull"] = (df["zl_score"] > zl_threshold_up).astype(float)
+        features["zl_score_bear"] = (df["zl_score"] < zl_threshold_down).astype(float)
+
         features["bb_position"] = df["bb_position"]
 
         # BB squeeze: low bandwidth indicates consolidation
         bb_width_avg = df["bb_width"].rolling(window=50).mean()
-        features["bb_squeeze"] = (df["bb_width"] < bb_width_avg * 0.5).astype(float)
+        bb_squeeze = (df["bb_width"] < bb_width_avg * 0.5)
+        features["bb_squeeze"] = bb_squeeze.astype(float)
+
+        # BB squeeze breakout (original sr_swing lines 1469-1473)
+        # Track if was in squeeze in last 5 bars
+        was_in_squeeze = bb_squeeze.rolling(window=5, min_periods=1).max().fillna(False).astype(bool)
+        close = df["close"]
+        features["bb_squeeze_breakout_bull"] = (was_in_squeeze & (close > df["bb_upper"])).astype(float)
+        features["bb_squeeze_breakout_bear"] = (was_in_squeeze & (close < df["bb_lower"])).astype(float)
 
         # ===== HTF FEATURES (if provided) =====
         if htf_df is not None and self.include_htf:
@@ -243,9 +320,29 @@ class FeatureExtractor:
 
             # MTF alignment: LTF and HTF agree on direction
             features["mtf_aligned"] = (features["trend_direction"] == features["htf_trend"]).astype(float)
+
+            # MTF strict mode features (original sr_swing lines 1498-1504)
+            htf_rising = (features["htf_trend"] > 0)
+            htf_falling = (features["htf_trend"] < 0)
+            features["htf_rising"] = htf_rising.astype(float)
+            features["htf_falling"] = htf_falling.astype(float)
+
+            # Strict mode: must have exact alignment
+            features["mtf_strict_bullish"] = htf_rising.astype(float)
+            features["mtf_strict_bearish"] = htf_falling.astype(float)
+
+            # Relaxed mode: allows neutral (not opposing)
+            features["mtf_relaxed_bullish"] = (htf_rising | ~htf_falling).astype(float)
+            features["mtf_relaxed_bearish"] = (htf_falling | ~htf_rising).astype(float)
         else:
             features["htf_trend"] = 0.0
             features["mtf_aligned"] = 0.5  # Neutral when no HTF
+            features["htf_rising"] = 0.0
+            features["htf_falling"] = 0.0
+            features["mtf_strict_bullish"] = 0.0
+            features["mtf_strict_bearish"] = 0.0
+            features["mtf_relaxed_bullish"] = 1.0  # Relaxed allows when no HTF
+            features["mtf_relaxed_bearish"] = 1.0
 
         # ===== POSITION STATE =====
         if position is None:

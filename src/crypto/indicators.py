@@ -525,23 +525,29 @@ def velocity_signal(
     close: pd.Series,
     threshold: float = 3.5,
     bars: int = 3,
-    atr_series: Optional[pd.Series] = None,
 ) -> Tuple[pd.Series, pd.Series]:
     """
-    Detect velocity (momentum) signals.
+    Detect velocity (momentum) signals using PERCENTAGE threshold.
+
+    Original sr_swing_strategy.py (lines 1440-1443):
+        price_change_pct = ((close - close[bars]) / close[bars]) * 100
+        velocity_bull = price_change_pct > threshold
+        velocity_bear = price_change_pct < -threshold
+
+    Args:
+        close: Close price series
+        threshold: Percentage threshold (e.g., 3.5 = 3.5% move)
+        bars: Number of bars to measure change over
 
     Returns:
         (velocity_long, velocity_short) - boolean series
     """
-    if atr_series is None:
-        # Simple ATR approximation if not provided
-        atr_series = close.diff().abs().rolling(window=14).mean()
+    # Calculate percentage change over N bars
+    prev_close = close.shift(bars)
+    price_change_pct = ((close - prev_close) / prev_close.replace(0, np.nan)) * 100
 
-    price_change = close.diff(bars)
-    velocity = price_change.abs() / (atr_series * bars).replace(0, np.nan)
-
-    velocity_long = (price_change > 0) & (velocity > threshold)
-    velocity_short = (price_change < 0) & (velocity > threshold)
+    velocity_long = price_change_pct > threshold
+    velocity_short = price_change_pct < -threshold
 
     return velocity_long.fillna(False), velocity_short.fillna(False)
 
@@ -550,19 +556,39 @@ def atr_expansion(
     high: pd.Series,
     low: pd.Series,
     close: pd.Series,
+    trend_direction: pd.Series,
     length: int = 14,
     multiplier: float = 3.5,
-) -> pd.Series:
+) -> Tuple[pd.Series, pd.Series]:
     """
-    Detect ATR expansion (volatility breakout).
+    Detect ATR expansion (volatility breakout) with TREND ALIGNMENT.
+
+    Original sr_swing_strategy.py (lines 1446-1454):
+        atr_exp_bull = current_atr > avg_atr * multiplier AND trend_is_bullish
+        atr_exp_bear = current_atr > avg_atr * multiplier AND trend_is_bearish
+
+    Args:
+        high: High price series
+        low: Low price series
+        close: Close price series
+        trend_direction: Trend direction series (1=bullish, -1=bearish, 0=neutral)
+        length: ATR period
+        multiplier: ATR expansion threshold multiplier
 
     Returns:
-        Boolean series where ATR expansion detected
+        (atr_exp_bull, atr_exp_bear) - boolean series for bullish/bearish expansions
     """
     current_atr = atr(high, low, close, length)
     avg_atr = current_atr.rolling(window=length * 2).mean()
 
-    return (current_atr > avg_atr * multiplier).fillna(False)
+    # ATR is expanding
+    atr_expanding = current_atr > avg_atr * multiplier
+
+    # Only signal when aligned with trend
+    atr_exp_bull = (atr_expanding & (trend_direction > 0)).fillna(False)
+    atr_exp_bear = (atr_expanding & (trend_direction < 0)).fillna(False)
+
+    return atr_exp_bull, atr_exp_bear
 
 
 # =============================================================================
@@ -604,6 +630,9 @@ def compute_all_indicators(
     velocity_bars = config.get("velocity_bars", 3)
     bb_length = config.get("bb_length", 20)
     bb_mult = config.get("bb_mult", 2.0)
+    zl_length = config.get("zl_length", 32)
+    zl_loop_start = config.get("zl_loop_start", 1)
+    zl_loop_end = config.get("zl_loop_end", 70)
 
     close = df["close"]
     high = df["high"]
@@ -646,6 +675,12 @@ def compute_all_indicators(
     result["macd_signal"] = signal_line
     result["macd_histogram"] = histogram
 
+    # Zero Lag Score (oscillator filter - original sr_swing lines 1386-1392)
+    result["zl_ema"] = zero_lag_ema(close, zl_length)
+    result["zl_score"] = zero_lag_score(close, zl_length, zl_loop_start, zl_loop_end)
+    result["zl_rising"] = (result["zl_ema"].diff() > 0).astype(float)
+    result["zl_falling"] = (result["zl_ema"].diff() < 0).astype(float)
+
     # Bollinger Bands
     bb_upper, bb_basis, bb_lower, bb_width = bollinger_bands(close, bb_length, bb_mult)
     result["bb_upper"] = bb_upper
@@ -673,13 +708,15 @@ def compute_all_indicators(
         close, high, low, volume, breakout_lookback
     )
 
-    # Velocity signals
+    # Velocity signals (uses percentage threshold, not ATR-normalized)
     result["velocity_long"], result["velocity_short"] = velocity_signal(
-        close, velocity_threshold, velocity_bars, result["atr"]
+        close, velocity_threshold, velocity_bars
     )
 
-    # ATR expansion
-    result["atr_expansion"] = atr_expansion(high, low, close, atr_length)
+    # ATR expansion (requires trend alignment)
+    result["atr_exp_bull"], result["atr_exp_bear"] = atr_expansion(
+        high, low, close, result["trend_direction"], atr_length
+    )
 
     # Volume relative to average
     result["volume_ratio"] = volume / volume.rolling(window=20).mean().replace(0, np.nan)

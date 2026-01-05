@@ -171,6 +171,7 @@ class IndicatorConfig(BaseModel):
     mfi_length: int = 14
     rsi_oversold: float = 30.0
     rsi_overbought: float = 70.0
+    mfi_momentum_threshold: float = 50.0  # MFI above this + rising = bullish momentum
 
     # MACD
     macd_fast: int = 12
@@ -180,6 +181,13 @@ class IndicatorConfig(BaseModel):
     # Bollinger Bands
     bb_length: int = 20
     bb_mult: float = 2.0
+
+    # Zero Lag Score (oscillator filter)
+    zl_length: int = 32
+    zl_loop_start: int = 1
+    zl_loop_end: int = 70
+    zl_threshold_up: float = 0.5
+    zl_threshold_down: float = -0.5
 
 
 class TrainingConfig(BaseModel):
