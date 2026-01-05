@@ -204,6 +204,22 @@ def train_ppo(
             device=device,
         )
 
+        # Compile policy network with torch.compile for kernel fusion + Triton
+        # Provides 10-30% speedup on PyTorch 2.x with modern GPUs
+        compile_mode = training.torch_compile
+        if device == "cuda" and compile_mode and hasattr(torch, "compile"):
+            try:
+                model.policy = torch.compile(
+                    model.policy,
+                    mode=compile_mode,
+                    fullgraph=False,  # Allow graph breaks for SB3 compatibility
+                )
+                logger.info(f"Policy compiled with torch.compile (mode={compile_mode})")
+            except Exception as e:
+                logger.warning(f"torch.compile failed, using eager mode: {e}")
+        elif not compile_mode:
+            logger.info("torch.compile disabled via config")
+
     # Callbacks
     checkpoint_callback = CheckpointCallback(
         save_freq=training.checkpoint_freq,

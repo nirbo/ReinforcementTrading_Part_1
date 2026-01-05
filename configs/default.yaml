@@ -63,7 +63,7 @@ training:
   total_timesteps: 10000000  # 10M steps - SL rate improved, need more convergence
   learning_rate: 0.0001  # Lower for stability with 5M steps (was 3e-4)
   n_steps: 2048
-  batch_size: 512
+  batch_size: 256
   n_epochs: 10
   gamma: 0.99
   gae_lambda: 0.95
@@ -76,6 +76,10 @@ training:
   - 256
   n_envs: 32
   use_gpu: true
+  # torch.compile mode for kernel fusion + Triton optimization
+  # Options: "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"
+  # Set to null or false to disable
+  torch_compile: "reduce-overhead"
   window_size: 30
   episode_max_steps: 2000
   checkpoint_freq: 50000

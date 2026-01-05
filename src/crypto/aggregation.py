@@ -168,8 +168,8 @@ def ensure_timeframe(
     else:
         raise ValueError(f"Invalid timeframe format: {timeframe}")
 
-    # Try loading existing data first
-    df = dm.load_ohlcv(symbol, timeframe)
+    # Try loading existing data first (auto_aggregate=False to prevent recursion)
+    df = dm.load_ohlcv(symbol, timeframe, auto_aggregate=False)
     if not df.empty and len(df) > 100:  # Arbitrary threshold for "enough data"
         logger.debug(f"Found existing {timeframe} data for {symbol}: {len(df)} bars")
         return df

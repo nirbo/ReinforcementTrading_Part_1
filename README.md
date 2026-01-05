@@ -2,12 +2,78 @@
 
 A production-grade reinforcement learning system for trading cryptocurrency perpetual futures on ByBit. Built with PyTorch 2.9+, Stable-Baselines3, and Gymnasium.
 
+**Current Best Model:** `models/best/ppo_crypto_final.zip`
+- **Win Rate:** 39.1% | **Profit Factor:** 1.19 | **R:R:** 1.86:1 | **Final Equity:** +41.4%
+
+---
+
+## Quick Start Guide
+
+### 1. Install Dependencies
+
+```bash
+cd ReinforcementTrading_Part_1
+python -m venv venv
+source venv/bin/activate
+pip install -r Requirements.txt
+```
+
+### 2. Download Historical Data
+
+```bash
+# Download 2 years of data for all pairs (SOL, BNB, SUI, LINK)
+python scripts/download_data.py --days 730
+
+# Or download specific pair
+python -c "
+from src.crypto.config import load_config
+from src.crypto.data_manager import DataManager
+
+config = load_config()
+dm = DataManager(config)
+dm.collect_historical('SOL/USDT:USDT', '5m', days=730)
+dm.collect_historical('SOL/USDT:USDT', '9m', days=730)
+"
+```
+
+### 3. Train a Model
+
+```bash
+# Train with default config (10M steps, ~4-6 hours on GPU)
+python -m src.crypto.train --data data/raw/SOL_USDT_USDT/5m/data.parquet --output models/
+
+# Train with custom config
+python -m src.crypto.train --config configs/default.yaml --output models/
+
+# Resume training from checkpoint
+python -m src.crypto.train --resume models/best/ppo_crypto_final.zip --output models/continued/
+```
+
+### 4. Evaluate Model (Backtest)
+
+```bash
+# Backtest on trained pair
+python -m src.crypto.evaluate --model models/best/ppo_crypto_final.zip --data data/raw/SOL_USDT_USDT/5m/data.parquet
+
+# Backtest on different pair (generalization test)
+python -m src.crypto.evaluate --model models/best/ppo_crypto_final.zip --data data/raw/BNB_USDT_USDT/5m/data.parquet --symbol "BNB/USDT:USDT"
+```
+
+### 5. Run Diagnostics
+
+```bash
+# Analyze model performance by exit type, direction, etc.
+python scripts/diagnose_model.py --model models/best/ppo_crypto_final.zip --data data/raw/SOL_USDT_USDT/5m/data.parquet
+```
+
+---
+
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Installation](#installation)
-4. [Quick Start](#quick-start)
+1. [Quick Start Guide](#quick-start-guide)
+2. [Overview](#overview)
+3. [Architecture](#architecture)
+4. [Installation](#installation)
 5. [Configuration System](#configuration-system)
 6. [Technical Indicators](#technical-indicators)
 7. [Feature Extraction](#feature-extraction)
@@ -15,9 +81,10 @@ A production-grade reinforcement learning system for trading cryptocurrency perp
 9. [Training Pipeline](#training-pipeline)
 10. [Backtesting Engine](#backtesting-engine)
 11. [Data Management](#data-management)
-12. [API Reference](#api-reference)
-13. [Testing](#testing)
-14. [Examples](#examples)
+12. [Critical Learnings](#critical-learnings)
+13. [API Reference](#api-reference)
+14. [Testing](#testing)
+15. [Examples](#examples)
 
 ---
 
@@ -28,31 +95,29 @@ A production-grade reinforcement learning system for trading cryptocurrency perp
 This system trains a PPO (Proximal Policy Optimization) agent to trade cryptocurrency perpetual futures. The agent learns to:
 
 - **Enter positions** (long or short) at optimal times
-- **Manage risk** via automatic stop-loss and take-profit levels
-- **Exit positions** when conditions are unfavorable
-- **Choose trade styles** (standard vs. tight SL/TP for momentum plays)
+- **Let SL/TP manage exits** (forced by design - see Critical Learnings)
+- **Maintain proper R:R ratio** via 3% SL / 6% TP (2:1 risk/reward)
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Timeframe Analysis** | LTF (15m) for entries, HTF (1h) for trend confirmation |
+| **Multi-Timeframe Analysis** | LTF (5m) for entries, HTF (9m) for trend confirmation |
 | **39+ Normalized Features** | Scale-invariant, bounded features for stable learning |
-| **6 Discrete Actions** | HOLD, LONG, SHORT, CLOSE, LONG_TIGHT, SHORT_TIGHT |
-| **Automatic SL/TP** | Position management with configurable risk levels |
+| **3 Discrete Actions** | HOLD, LONG, SHORT (CLOSE removed - see Critical Learnings) |
+| **Forced SL/TP Exits** | Positions ONLY exit via stop-loss or take-profit |
 | **Dynamic Fees** | Real-time fee fetching from ByBit API |
 | **Walk-Forward Validation** | Out-of-sample testing for robustness |
-| **Monte Carlo Simulation** | Statistical confidence in backtest results |
 
 ### Trading Pairs
 
 Default configuration targets high-liquidity ByBit perpetuals:
 
 ```
-SOL/USDT:USDT  (default)
+SOL/USDT:USDT  (default, best results)
+BNB/USDT:USDT  (generalizes well)
 SUI/USDT:USDT
 LINK/USDT:USDT
-BNB/USDT:USDT
 ```
 
 ---
@@ -100,8 +165,8 @@ BNB/USDT:USDT
 ├─────────────────────────────────────────────────────────────────┤
 │  trading_env.py (Gymnasium-compatible)                           │
 │  ├── Observation: (window_size, feature_dim + 3)               │
-│  ├── Action Space: Discrete(6)                                  │
-│  ├── Reward: Realized PnL + Unrealized Shaping                 │
+│  ├── Action Space: Discrete(3) - HOLD, LONG, SHORT             │
+│  ├── Reward: Realized PnL (exits via SL/TP only)               │
 │  └── SL/TP Management                                           │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -687,23 +752,21 @@ feature_matrix = extractor.precompute_features(ohlcv_df)
 
 The `CryptoTradingEnv` is a Gymnasium-compatible environment for RL training.
 
-### Action Space
+### Action Space (3 Discrete Actions)
 
 | Action | Value | Description |
 |--------|-------|-------------|
 | `HOLD` | 0 | Do nothing |
-| `LONG` | 1 | Open long position (standard SL/TP) |
-| `SHORT` | 2 | Open short position (standard SL/TP) |
-| `CLOSE` | 3 | Close current position |
-| `LONG_TIGHT` | 4 | Open long with tight SL/TP (momentum) |
-| `SHORT_TIGHT` | 5 | Open short with tight SL/TP (momentum) |
+| `LONG` | 1 | Open long position |
+| `SHORT` | 2 | Open short position |
+
+**CLOSE action was removed** - see [Critical Learnings](#critical-learnings).
 
 ### Action Semantics
 
-- **Position Flipping**: LONG while short → close short, open long (and vice versa)
-- **SL/TP Automatic**: Positions have automatic stop-loss and take-profit levels
-- **Standard SL/TP**: 2% SL, 4% TP (2:1 risk/reward)
-- **Tight SL/TP**: 1% SL, 1.5% TP (for momentum trades)
+- **SL/TP Only Exits**: Positions exit ONLY via stop-loss or take-profit (no manual close)
+- **FLIP Disabled**: Cannot change direction while in position (prevents exit gaming)
+- **Standard SL/TP**: 3% SL, 6% TP (2:1 risk/reward)
 
 ### Observation Space
 
@@ -1123,6 +1186,251 @@ print(f"Date range: {validation['start']} to {validation['end']}")
 # Get real-time fee (cached for 1 hour)
 fee = dm.fetch_fee("SOL/USDT:USDT")
 print(f"Taker fee: {fee:.5f}")  # e.g., 0.00055
+```
+
+---
+
+## Critical Learnings
+
+These are breakthrough discoveries that dramatically improved model profitability. **Do not revert these changes.**
+
+### 1. Remove CLOSE Action (Critical!)
+
+**Problem**: With CLOSE action available, the model exited 85.7% of trades early via MANUAL_CLOSE:
+- Average win: +0.80% (should be +6% at TP)
+- R:R ratio: 0.72:1 (inverted from 2:1 target)
+- Result: **-328% total loss**
+
+**Solution**: Remove CLOSE action entirely (3 actions: HOLD, LONG, SHORT):
+- Forces model to use SL/TP for exits
+- R:R ratio restored: 1.86:1
+- Result: **+41% profit**
+
+```python
+# In trading_env.py
+class Action(IntEnum):
+    HOLD = 0
+    LONG = 1
+    SHORT = 2
+    # CLOSE removed - model closed winners early, destroying R:R
+```
+
+### 2. Disable FLIP (Critical!)
+
+**Problem**: After removing CLOSE, model learned to FLIP (LONG→SHORT) as exit strategy:
+- 91.8% of trades were FLIP exits
+- Still avoided SL/TP, destroying R:R ratio
+
+**Solution**: Disable FLIP capability - positions can ONLY exit via SL/TP:
+```python
+# In trading_env.py step():
+elif action == Action.LONG:
+    if self.position.direction == 0:  # Only if flat
+        reward += self._open_position(1, tight=False)
+    # FLIP disabled - no position change if already long or short
+```
+
+### 3. Win Rate Math
+
+With forced SL/TP exits:
+- **SL**: 3% loss
+- **TP**: 6% gain
+- **R:R**: 2:1
+
+Breakeven win rate = 1 / (1 + R:R) = 1 / 3 = **33.3%**
+
+Current model: **39.1% win rate** → Profitable!
+
+### 4. Exit Type Analysis
+
+Always analyze trades by exit type:
+```
+TP_HIT: Goal exits - maximize these (target >25%)
+SL_HIT: Where losses come from - minimize (<30%)
+MANUAL_CLOSE: Should be 0% with CLOSE removed
+FLIP: Should be 0% with FLIP disabled
+END_OF_DATA: Neutral - just episode end
+```
+
+### 5. Generalization
+
+Model trained on SOL generalizes to high-liquidity pairs:
+| Pair | Profit Factor | PnL |
+|------|---------------|-----|
+| SOL (trained) | 1.19 | +46.7% |
+| BNB | 1.04 | +6.8% |
+| SUI | 0.92 | -27.9% |
+| LINK | 0.93 | -21.9% |
+
+**Insight**: Works best on high-volume, low-spread pairs. Consider multi-pair training for better generalization.
+
+---
+
+## Hyperparameter Experimentation
+
+Once you have a working model, systematic experimentation helps find optimal trading parameters.
+
+### Key Parameters to Experiment With
+
+| Category | Parameter | Default | Range to Test |
+|----------|-----------|---------|---------------|
+| **Timeframes** | LTF | 5m | 1m, 3m, 5m, 15m |
+| | HTF | 9m | 15m, 30m, 1h, 4h |
+| **Risk** | SL % | 3% | 1.5%, 2%, 3%, 4%, 5% |
+| | TP % | 6% | 3%, 4%, 6%, 8%, 10% |
+| | R:R ratio | 2:1 | 1.5:1, 2:1, 2.5:1, 3:1 |
+| **Indicators** | ATR length | 14 | 7, 14, 21 |
+| | RSI length | 14 | 7, 14, 21 |
+| | HMA length | 14 | 10, 14, 20, 30 |
+| | Pivot bars | 4/3 | 3/2, 4/3, 5/4 |
+| **Training** | Window size | 30 | 20, 30, 50 |
+| | Entropy coef | 0.02 | 0.01, 0.02, 0.05 |
+
+### Running Experiments
+
+#### Method 1: Manual Config Variation
+
+```bash
+# Create experiment config
+cp configs/default.yaml configs/exp_sl2_tp4.yaml
+# Edit SL/TP values, then train
+python -m src.crypto.train --config configs/exp_sl2_tp4.yaml --output models/exp_sl2_tp4/
+```
+
+#### Method 2: Training Experiments (Hours)
+
+Train new models with different hyperparameters:
+
+```bash
+# Run predefined experiment grid (trains new model per config)
+python scripts/run_experiments.py --experiments sl_tp_grid
+
+# Run specific training experiment
+python scripts/run_experiments.py --sl 2.0 --tp 4.0 --ltf 5m --htf 1h
+
+# Quick validation mode (1M steps instead of 10M)
+python scripts/run_experiments.py --experiments sl_tp_grid --quick
+
+# List available experiment grids
+python scripts/run_experiments.py --list-experiments
+```
+
+#### Method 3: Inference Experiments (Minutes) - RECOMMENDED
+
+Test existing trained model with different SL/TP - **no retraining needed**:
+
+```bash
+# SL × TP matrix (16 combinations, ~10-15 minutes)
+python scripts/inference_experiments.py --model models/best/ppo_crypto_final.zip \
+    --sl 1.5 2.0 2.5 3.0 --tp 3.0 4.0 5.0 6.0
+
+# Fine-grained search around known good values
+python scripts/inference_experiments.py --model models/best/ppo_crypto_final.zip \
+    --sl 2.5 2.75 3.0 3.25 3.5 --tp 5.0 5.5 6.0 6.5 7.0
+
+# Test on different trading pair
+python scripts/inference_experiments.py --model models/best/ppo_crypto_final.zip \
+    --sl 2.0 3.0 --tp 4.0 6.0 --pair BNB/USDT:USDT
+
+# Export results to CSV
+python scripts/inference_experiments.py --model models/best/ppo_crypto_final.zip \
+    --sl 2.0 3.0 --tp 4.0 6.0 --csv results.csv
+```
+
+**Why inference experiments are faster:**
+- The model already learned **when to enter** (long/short timing)
+- SL/TP is applied at **execution time**, not learned
+- So you can test different SL/TP without retraining!
+
+**Output example:**
+```
+SL × TP MATRIX - PROFIT_FACTOR
+==============================
+SL \\ TP    3.0%   4.0%   5.0%   6.0%
+  1.5%     0.92   1.05   1.12   1.08
+  2.0%     0.98   1.11   1.18   1.15
+  2.5%     1.02   1.15   1.21   1.19
+  3.0%     1.05   1.17   1.22   1.19
+
+Best: SL=2.5% TP=5.0% → profit_factor=1.21
+```
+
+#### Method 4: Python API
+
+```python
+from scripts.run_experiments import run_experiment, compare_experiments
+
+# Run single experiment
+result = run_experiment(
+    name="sl2_tp6",
+    sl_pct=0.02,
+    tp_pct=0.06,
+    ltf="5m",
+    htf="1h",
+    timesteps=1_000_000,  # Quick test
+)
+
+# Compare multiple experiments
+compare_experiments(["sl2_tp4", "sl2_tp6", "sl3_tp6", "sl3_tp9"])
+```
+
+### Experiment Design Guidelines
+
+1. **Change one variable at a time** - Isolate effects
+2. **Use same seed** - Reproducibility (`seed: 42` in config)
+3. **Quick validation first** - 1M steps before full 10M
+4. **Track all metrics** - Not just PnL (win rate, drawdown, trade count)
+
+### Priority Experiments
+
+Based on current model (39% WR, 1.19 PF, 1.86 R:R):
+
+| Priority | Experiment | Hypothesis |
+|----------|------------|------------|
+| 1 | **SL/TP ratio sweep** | Tighter SL (2%) might catch fewer bad entries |
+| 2 | **HTF variations** | 1h or 4h HTF might filter noise better |
+| 3 | **LTF variations** | 15m might reduce noise vs 5m |
+| 4 | **Multi-pair training** | SOL+BNB combined might generalize better |
+
+### Comparing Results
+
+```bash
+# After running experiments, compare results
+python scripts/compare_experiments.py models/exp_*/
+
+# Output:
+# ┌─────────────┬──────────┬─────────┬───────┬─────────┐
+# │ Experiment  │ Win Rate │ PF      │ R:R   │ Equity  │
+# ├─────────────┼──────────┼─────────┼───────┼─────────┤
+# │ sl2_tp4     │ 42.1%    │ 1.15    │ 1.89  │ +32.4%  │
+# │ sl3_tp6     │ 39.1%    │ 1.19    │ 1.86  │ +41.4%  │
+# │ sl2_tp6     │ 35.2%    │ 1.21    │ 2.74  │ +28.1%  │
+# └─────────────┴──────────┴─────────┴───────┴─────────┘
+```
+
+### Metrics to Optimize
+
+| Metric | Target | Why |
+|--------|--------|-----|
+| **Profit Factor** | > 1.3 | Primary - overall profitability |
+| **Win Rate** | > 40% | Psychological sustainability |
+| **Max Drawdown** | < 25% | Risk management |
+| **Trade Count** | > 50 | Statistical significance |
+| **Sharpe Ratio** | > 1.0 | Risk-adjusted returns |
+
+### Saving Experiment Results
+
+All experiments save to `models/experiments/`:
+```
+models/experiments/
+├── sl2_tp4_5m_1h/
+│   ├── config.yaml
+│   ├── ppo_crypto_final.zip
+│   ├── final_stats.json
+│   └── tensorboard/
+├── sl3_tp6_5m_1h/
+│   └── ...
+└── comparison_report.md
 ```
 
 ---

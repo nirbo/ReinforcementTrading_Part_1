@@ -304,6 +304,14 @@ class TrainingConfig(BaseModel):
         default=True,
         description="Use GPU if available"
     )
+    torch_compile: Optional[str] = Field(
+        default="reduce-overhead",
+        description=(
+            "torch.compile mode for kernel fusion + Triton optimization. "
+            "Options: 'default', 'reduce-overhead', 'max-autotune', "
+            "'max-autotune-no-cudagraphs', or null/false to disable"
+        )
+    )
 
     # Environment
     window_size: int = 30

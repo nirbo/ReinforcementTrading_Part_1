@@ -654,9 +654,26 @@ def run_full_evaluation(
     """
     config = config or load_config()
 
-    # Load model
+    # Load model with torch.compile for fast inference
+    import warnings
+    import torch
+
     logger.info(f"Loading model from: {model_path}")
-    model = PPO.load(model_path)
+
+    # Suppress SB3 warning about MLP on GPU - torch.compile optimizes it
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*GPU.*MlpPolicy.*")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = PPO.load(model_path, device=device)
+
+    # Compile for fast inference
+    compile_mode = config.training.torch_compile
+    if device == "cuda" and compile_mode and hasattr(torch, "compile"):
+        try:
+            model.policy = torch.compile(model.policy, mode=compile_mode, fullgraph=False)
+            logger.info(f"Policy compiled (mode={compile_mode}, device={device})")
+        except Exception as e:
+            logger.debug(f"torch.compile skipped: {e}")
 
     # Create backtester
     backtester = Backtester(model, config)
