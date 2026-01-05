@@ -384,8 +384,13 @@ def detect_pivot_high(
     use_high_low: bool = True,
 ) -> pd.Series:
     """
-    Detect pivot highs.
-    Returns Series with pivot value where detected, NaN elsewhere.
+    Detect pivot highs (NO LOOK-AHEAD VERSION).
+
+    IMPORTANT: Pivot at bar N requires N+right_bars to confirm.
+    We store the pivot value at the CONFIRMATION bar (i), not the pivot bar.
+    This ensures no future information leaks into the observation.
+
+    Returns Series with pivot value at confirmation bar, NaN elsewhere.
     """
     source = high if use_high_low else close
     pivots = pd.Series(np.nan, index=source.index)
@@ -409,7 +414,9 @@ def detect_pivot_high(
                     break
 
         if is_pivot:
-            pivots.iloc[pivot_idx] = pivot_val
+            # Store at confirmation bar (i), NOT pivot bar (pivot_idx)
+            # This prevents look-ahead bias
+            pivots.iloc[i] = pivot_val
 
     return pivots
 
@@ -422,8 +429,13 @@ def detect_pivot_low(
     use_high_low: bool = True,
 ) -> pd.Series:
     """
-    Detect pivot lows.
-    Returns Series with pivot value where detected, NaN elsewhere.
+    Detect pivot lows (NO LOOK-AHEAD VERSION).
+
+    IMPORTANT: Pivot at bar N requires N+right_bars to confirm.
+    We store the pivot value at the CONFIRMATION bar (i), not the pivot bar.
+    This ensures no future information leaks into the observation.
+
+    Returns Series with pivot value at confirmation bar, NaN elsewhere.
     """
     source = low if use_high_low else close
     pivots = pd.Series(np.nan, index=source.index)
@@ -447,7 +459,9 @@ def detect_pivot_low(
                     break
 
         if is_pivot:
-            pivots.iloc[pivot_idx] = pivot_val
+            # Store at confirmation bar (i), NOT pivot bar (pivot_idx)
+            # This prevents look-ahead bias
+            pivots.iloc[i] = pivot_val
 
     return pivots
 

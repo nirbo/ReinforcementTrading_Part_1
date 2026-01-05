@@ -140,9 +140,13 @@ def train_ppo(
     logger.info(f"Output directory: {run_dir}")
 
     # Create environments
-    def make_train_env():
-        env = create_env(train_df, config, train=True, htf_df=htf_train_df)
-        return Monitor(env)
+    # Note: For SubprocVecEnv, we use lambda factories with unique seeds
+    def make_train_env(rank: int):
+        def _init():
+            env = create_env(train_df.copy(), config, train=True, htf_df=htf_train_df)
+            env.reset(seed=training.seed + rank)
+            return Monitor(env)
+        return _init
 
     def make_val_env():
         env = create_env(val_df, config, train=False, htf_df=htf_val_df)
@@ -152,9 +156,9 @@ def train_ppo(
     n_envs = training.n_envs
     if n_envs > 1:
         logger.info(f"Creating {n_envs} parallel environments (SubprocVecEnv)")
-        train_vec_env = SubprocVecEnv([make_train_env for _ in range(n_envs)])
+        train_vec_env = SubprocVecEnv([make_train_env(i) for i in range(n_envs)], start_method="fork")
     else:
-        train_vec_env = DummyVecEnv([make_train_env])
+        train_vec_env = DummyVecEnv([make_train_env(0)])
     val_env = make_val_env()
 
     # Create or load model

@@ -90,13 +90,27 @@ class FeeConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    """Risk management settings."""
+    """Risk management settings - Conservative defaults for real trading."""
 
-    max_position_pct: float = 1.0       # 100% equity per trade
-    max_leverage: int = 5               # Max 5x leverage
-    daily_loss_limit_pct: float = 0.10  # 10% daily loss limit
+    # ═══════════════════════════════════════════════════════════════════════════
+    # POSITION SIZING - How much capital per trade
+    # ═══════════════════════════════════════════════════════════════════════════
+    max_position_pct: float = 0.25      # 25% equity per trade (was 100% - too aggressive)
+    max_leverage: int = 3               # 3x leverage (conservative)
+    apply_leverage: bool = True         # Whether to apply leverage to PnL calculations
 
-    # SL/TP defaults (percentage-based)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # RISK LIMITS - Circuit breakers to prevent blowups
+    # ═══════════════════════════════════════════════════════════════════════════
+    daily_loss_limit_pct: float = 0.05  # 5% daily loss = stop trading (was 10%)
+    max_concurrent_positions: int = 1   # Only 1 position at a time per pair
+    cooldown_bars: int = 3              # Wait 3 bars after closing before new trade
+    max_trades_per_day: int = 50        # Prevent overtrading
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SL/TP CONSTRAINTS - Prevent noise exits and catastrophic losses
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Default SL/TP (percentage-based)
     default_sl_pct: float = 0.02        # 2% stop loss
     default_tp_pct: float = 0.04        # 4% take profit (2:1 R:R)
 
@@ -104,11 +118,30 @@ class RiskConfig(BaseModel):
     tight_sl_pct: float = 0.01          # 1% tight stop
     tight_tp_pct: float = 0.015         # 1.5% tight TP
 
+    # SL/TP bounds (enforced regardless of agent's choice)
+    min_sl_pct: float = 0.005           # 0.5% minimum SL (prevent noise exits)
+    max_sl_pct: float = 0.05            # 5% maximum SL (prevent catastrophic losses)
+    min_tp_pct: float = 0.01            # 1% minimum TP
+    max_tp_pct: float = 0.10            # 10% maximum TP
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SLIPPAGE MODEL - Account for market impact
+    # ═══════════════════════════════════════════════════════════════════════════
+    base_slippage_pct: float = 0.0001   # 0.01% base slippage
+    size_slippage_factor: float = 0.0   # Additional slippage per % of equity (0 = disabled)
+
     @field_validator("max_leverage")
     @classmethod
     def validate_leverage(cls, v: int) -> int:
         if not 1 <= v <= 100:
             raise ValueError(f"Leverage must be between 1 and 100, got {v}")
+        return v
+
+    @field_validator("max_position_pct")
+    @classmethod
+    def validate_position_pct(cls, v: float) -> float:
+        if not 0.01 <= v <= 1.0:
+            raise ValueError(f"Position size must be between 1% and 100%, got {v}")
         return v
 
 
@@ -156,7 +189,7 @@ class TrainingConfig(BaseModel):
     total_timesteps: int = 1_000_000
     learning_rate: float = 3e-4
     n_steps: int = 2048
-    batch_size: int = 64
+    batch_size: int = 512  # Larger batch for GPU utilization
     n_epochs: int = 10
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -205,8 +238,8 @@ class TrainingConfig(BaseModel):
         description="Hidden layer sizes for policy/value networks"
     )
     n_envs: int = Field(
-        default=1,
-        description="Number of parallel environments (use more for GPU utilization)"
+        default=32,
+        description="Number of parallel environments (32 for RTX 5090 with 32GB VRAM)"
     )
     use_gpu: bool = Field(
         default=True,
@@ -231,6 +264,13 @@ class DataConfig(BaseModel):
     data_dir: Path = Path("data")
     raw_dir: Path = Path("data/raw")
     processed_dir: Path = Path("data/processed")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TRAIN/EVAL SPLIT - Seed-based holdout for reproducible evaluation
+    # ═══════════════════════════════════════════════════════════════════════════
+    eval_holdout_pct: float = 0.20      # 20% of data reserved for evaluation
+    eval_holdout_seed: int = 12345      # Fixed seed for consistent holdout selection
+    use_temporal_split: bool = False    # If True: last N% is eval. If False: random shard
 
     # Parquet settings
     compression: str = "snappy"
