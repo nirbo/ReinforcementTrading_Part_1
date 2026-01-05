@@ -307,7 +307,7 @@ class FeatureExtractor:
 
         # MACD Signal Cross detection
         macd_above_signal = df["macd"] > df["macd_signal"]
-        macd_above_signal_prev = macd_above_signal.shift(1).fillna(False).astype(bool)
+        macd_above_signal_prev = macd_above_signal.shift(1, fill_value=False)
         features["macd_cross_bull"] = (macd_above_signal & ~macd_above_signal_prev).astype(float)
         features["macd_cross_bear"] = (~macd_above_signal & macd_above_signal_prev).astype(float)
 
