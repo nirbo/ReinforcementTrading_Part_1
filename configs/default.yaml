@@ -12,8 +12,8 @@ pairs:
   - BNB/USDT:USDT
   default_pair: SOL/USDT:USDT
 timeframes:
-  ltf: 15m
-  htf: 1h
+  ltf: 5m
+  htf: 9m
 fees:
   use_dynamic_fees: true
   default_taker_fee: 0.00055
