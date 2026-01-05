@@ -27,8 +27,7 @@ class Action(IntEnum):
     LONG = 1
     SHORT = 2
     CLOSE = 3
-    LONG_TIGHT = 4  # Long with tight SL/TP (momentum)
-    SHORT_TIGHT = 5  # Short with tight SL/TP (momentum)
+    # TIGHT actions removed - 1% SL triggers on noise, 38% WR vs 51% for normal
 
 
 @dataclass
@@ -102,8 +101,8 @@ class CryptoTradingEnv(gym.Env):
             self.df, htf_df=self.htf_df
         )
 
-        # Action space: 6 discrete actions
-        self.action_space = spaces.Discrete(6)
+        # Action space: 4 discrete actions (HOLD, LONG, SHORT, CLOSE)
+        self.action_space = spaces.Discrete(4)
 
         # Observation space: (window_size, feature_dim)
         feature_dim = self._precomputed_features.shape[1]
@@ -278,6 +277,18 @@ class CryptoTradingEnv(gym.Env):
         total_fees = 2 * self.taker_fee
         net_pnl_pct = pnl_pct - total_fees
 
+        # Premature exit penalty: discourage closing before reaching TP zone
+        premature_penalty = 0.0
+        if reason in ("MANUAL_CLOSE", "FLIP"):
+            tp_distance = abs(self.current_trade.tp_price - entry_price) / entry_price
+            current_distance = abs(exit_price - entry_price) / entry_price
+            achieved_pct = current_distance / tp_distance if tp_distance > 0 else 0
+
+            if achieved_pct < 0.5:  # Closed before reaching 50% of TP
+                # Penalty: 0.5% scaled by how early we exited
+                premature_penalty = 0.005 * (1 - achieved_pct * 2)  # Max 0.5% at 0%, 0% at 50%
+                net_pnl_pct -= premature_penalty
+
         # Update trade record
         self.current_trade.exit_bar = self.current_bar
         self.current_trade.exit_price = exit_price
@@ -402,20 +413,7 @@ class CryptoTradingEnv(gym.Env):
         elif action == Action.CLOSE:
             if self.position.direction != 0:
                 reward += self._close_position("MANUAL_CLOSE")
-
-        elif action == Action.LONG_TIGHT:
-            if self.position.direction == 0:
-                reward += self._open_position(1, tight=True)
-            elif self.position.direction == -1:
-                reward += self._close_position("FLIP")
-                reward += self._open_position(1, tight=True)
-
-        elif action == Action.SHORT_TIGHT:
-            if self.position.direction == 0:
-                reward += self._open_position(-1, tight=True)
-            elif self.position.direction == 1:
-                reward += self._close_position("FLIP")
-                reward += self._open_position(-1, tight=True)
+        # TIGHT actions (4, 5) removed from action space
 
         # Check SL/TP
         sl_tp_reward = self._check_sl_tp()
@@ -428,9 +426,11 @@ class CryptoTradingEnv(gym.Env):
             unrealized = self._compute_unrealized_pnl()
             self.position.unrealized_pnl_pct = unrealized
 
-            # Delta unrealized as shaping reward
+            # ASYMMETRIC shaping: only penalize holding losers, don't reward holding winners
+            # This prevents the model from closing winners early to "lock in" shaping reward
             delta_unrealized = unrealized - self._prev_unrealized_pnl
-            reward += delta_unrealized * self.unrealized_pnl_weight * self.reward_scale
+            if unrealized < 0:  # Only apply when losing
+                reward += delta_unrealized * self.unrealized_pnl_weight * self.reward_scale
             self._prev_unrealized_pnl = unrealized
 
         # Advance time
