@@ -430,13 +430,13 @@ class CryptoTradingEnv(gym.Env):
             unrealized = self._compute_unrealized_pnl()
             self.position.unrealized_pnl_pct = unrealized
 
-            # Asymmetric shaping: penalize holding losers more than rewarding holding winners
-            # This reduces incentive to close winners early while still punishing holding losers
+            # Asymmetric shaping: strongly penalize holding losers, weakly reward holding winners
+            # Goal: Model learns to cut losers fast before they hit SL
             delta_unrealized = unrealized - self._prev_unrealized_pnl
-            if unrealized < 0:  # Full weight for losers - incentivize cutting losses
-                reward += delta_unrealized * self.unrealized_pnl_weight * self.reward_scale
-            else:  # Reduced weight for winners - some feedback but less incentive to close
-                reward += delta_unrealized * self.unrealized_pnl_weight * 0.3 * self.reward_scale
+            if unrealized < 0:  # 2x weight for losers - strong incentive to cut losses early
+                reward += delta_unrealized * self.unrealized_pnl_weight * 2.0 * self.reward_scale
+            else:  # 0.2x weight for winners - minimal feedback to avoid early exits
+                reward += delta_unrealized * self.unrealized_pnl_weight * 0.2 * self.reward_scale
             self._prev_unrealized_pnl = unrealized
 
         # Advance time
