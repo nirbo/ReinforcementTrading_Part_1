@@ -165,6 +165,54 @@ class TrainingConfig(BaseModel):
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MODEL ARCHITECTURE - Neural Network Sizing
+    # ═══════════════════════════════════════════════════════════════════════════
+    #
+    # MLP Policy Architecture Formula:
+    # ─────────────────────────────────
+    # For net_arch = [H1, H2] (two hidden layers):
+    #
+    #   Policy Network (Actor):
+    #     Layer 1: obs_dim × H1 + H1 (bias)
+    #     Layer 2: H1 × H2 + H2 (bias)
+    #     Output:  H2 × action_dim + action_dim (bias)
+    #
+    #   Value Network (Critic):
+    #     Layer 1: obs_dim × H1 + H1 (bias)
+    #     Layer 2: H1 × H2 + H2 (bias)
+    #     Output:  H2 × 1 + 1 (bias)
+    #
+    # Total Parameters ≈ 2 × (obs_dim × H1 + H1 × H2 + H2 × action_dim)
+    #
+    # Example with obs_dim=180, action_dim=3, net_arch=[256, 256]:
+    #   ≈ 2 × (180×256 + 256×256 + 256×3) ≈ 225,000 params
+    #
+    # Example with obs_dim=180, action_dim=3, net_arch=[512, 512]:
+    #   ≈ 2 × (180×512 + 512×512 + 512×3) ≈ 710,000 params
+    #
+    # Sizing Guidelines:
+    # ─────────────────
+    # - Small (100-300k params): Good for simple patterns, fast training
+    # - Medium (300k-1M params): Balance of capacity and generalization
+    # - Large (1M+ params): Risk of overfitting, needs more data
+    #
+    # For RL trading, smaller is often better to avoid overfitting.
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    net_arch: List[int] = Field(
+        default=[256, 256],
+        description="Hidden layer sizes for policy/value networks"
+    )
+    n_envs: int = Field(
+        default=1,
+        description="Number of parallel environments (use more for GPU utilization)"
+    )
+    use_gpu: bool = Field(
+        default=True,
+        description="Use GPU if available"
+    )
+
     # Environment
     window_size: int = 30
     episode_max_steps: int = 2000

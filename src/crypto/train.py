@@ -27,7 +27,7 @@ from stable_baselines3.common.callbacks import (
     EvalCallback,
 )
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from src.crypto.config import CryptoConfig, load_config
 from src.crypto.trading_env import CryptoTradingEnv
@@ -148,7 +148,13 @@ def train_ppo(
         env = create_env(val_df, config, train=False, htf_df=htf_val_df)
         return Monitor(env)
 
-    train_vec_env = DummyVecEnv([make_train_env])
+    # Use parallel environments if n_envs > 1 (better GPU utilization)
+    n_envs = training.n_envs
+    if n_envs > 1:
+        logger.info(f"Creating {n_envs} parallel environments (SubprocVecEnv)")
+        train_vec_env = SubprocVecEnv([make_train_env for _ in range(n_envs)])
+    else:
+        train_vec_env = DummyVecEnv([make_train_env])
     val_env = make_val_env()
 
     # Create or load model
@@ -156,9 +162,23 @@ def train_ppo(
         logger.info(f"Resuming from: {resume_path}")
         model = PPO.load(resume_path, env=train_vec_env)
     else:
-        # Set device
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {device}")
+        # Set device based on config and availability
+        if training.use_gpu and torch.cuda.is_available():
+            device = "cuda"
+            logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            device = "cpu"
+            logger.info(f"Using device: {device}")
+
+        # Policy network architecture from config
+        # See config.py for sizing formula and guidelines
+        policy_kwargs = {
+            "net_arch": dict(
+                pi=training.net_arch,  # Policy network hidden layers
+                vf=training.net_arch,  # Value network hidden layers
+            )
+        }
+        logger.info(f"Network architecture: {training.net_arch}")
 
         model = PPO(
             policy="MlpPolicy",
@@ -173,6 +193,7 @@ def train_ppo(
             ent_coef=training.ent_coef,
             vf_coef=training.vf_coef,
             max_grad_norm=training.max_grad_norm,
+            policy_kwargs=policy_kwargs,
             tensorboard_log=str(tensorboard_dir),
             verbose=1,
             seed=training.seed,
