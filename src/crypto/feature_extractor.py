@@ -110,12 +110,37 @@ FEATURE_SPECS: List[FeatureSpec] = [
     FeatureSpec("bb_squeeze_breakout_bull", 0.0, 1.0),  # Was in squeeze, now above upper
     FeatureSpec("bb_squeeze_breakout_bear", 0.0, 1.0),  # Was in squeeze, now below lower
     # MTF strict mode features (original sr_swing lines 1498-1504)
+    FeatureSpec("htf_trend", -1.0, 1.0),              # HTF trend direction
+    FeatureSpec("mtf_aligned", 0.0, 1.0),             # LTF and HTF agree on direction
     FeatureSpec("htf_rising", 0.0, 1.0),              # HTF trend rising
     FeatureSpec("htf_falling", 0.0, 1.0),             # HTF trend falling
     FeatureSpec("mtf_strict_bullish", 0.0, 1.0),      # Strict mode: htf_rising only
     FeatureSpec("mtf_strict_bearish", 0.0, 1.0),      # Strict mode: htf_falling only
     FeatureSpec("mtf_relaxed_bullish", 0.0, 1.0),     # Relaxed: htf_rising OR not htf_falling
     FeatureSpec("mtf_relaxed_bearish", 0.0, 1.0),     # Relaxed: htf_falling OR not htf_rising
+
+    # =========================================================================
+    # P2 FEATURES - Advanced SR Swing Strategy features
+    # =========================================================================
+
+    # Darvas Box Theory (sr_swing lines 1175-1182)
+    FeatureSpec("box_active", 0.0, 1.0),              # Box is currently active (state=3)
+    FeatureSpec("box_position", 0.0, 1.0),            # Price position within box (0=bottom, 1=top)
+    FeatureSpec("box_state_norm", 0.0, 1.0),          # Box state normalized (0-3 → 0-1)
+    FeatureSpec("box_breakout_bull", 0.0, 1.0),       # Bullish box breakout signal
+    FeatureSpec("box_breakout_bear", 0.0, 1.0),       # Bearish box breakout signal
+
+    # Gravity Mode (sr_swing lines 1487-1516)
+    FeatureSpec("gravity_bullish", 0.0, 1.0),         # Gravity mode is bullish
+    FeatureSpec("gravity_bearish", 0.0, 1.0),         # Gravity mode is bearish
+
+    # Pivot Strength (touch count per level)
+    FeatureSpec("resistance_strength_norm", 0.0, 1.0),  # Normalized resistance touches
+    FeatureSpec("support_strength_norm", 0.0, 1.0),     # Normalized support touches
+
+    # Pending Level Confirmation
+    FeatureSpec("pending_resistance_norm", 0.0, 1.0),   # Pending resistance levels
+    FeatureSpec("pending_support_norm", 0.0, 1.0),      # Pending support levels
 
     # Position state (added dynamically)
     FeatureSpec("position_direction", -1.0, 1.0),
@@ -308,6 +333,48 @@ class FeatureExtractor:
         close = df["close"]
         features["bb_squeeze_breakout_bull"] = (was_in_squeeze & (close > df["bb_upper"])).astype(float)
         features["bb_squeeze_breakout_bear"] = (was_in_squeeze & (close < df["bb_lower"])).astype(float)
+
+        # ===== P2 FEATURES - Advanced SR Swing Strategy =====
+
+        # Darvas Box Theory (sr_swing lines 1175-1182)
+        if "box_state" in df.columns:
+            features["box_active"] = df["box_active"]
+            features["box_position"] = df["box_position"]
+            features["box_state_norm"] = df["box_state"] / 3.0  # Normalize 0-3 to 0-1
+            features["box_breakout_bull"] = df["box_breakout_bull"].astype(float)
+            features["box_breakout_bear"] = df["box_breakout_bear"].astype(float)
+        else:
+            features["box_active"] = 0.0
+            features["box_position"] = 0.5
+            features["box_state_norm"] = 0.0
+            features["box_breakout_bull"] = 0.0
+            features["box_breakout_bear"] = 0.0
+
+        # Gravity Mode (sr_swing lines 1487-1516)
+        if "gravity_bullish" in df.columns:
+            features["gravity_bullish"] = df["gravity_bullish"]
+            features["gravity_bearish"] = df["gravity_bearish"]
+        else:
+            features["gravity_bullish"] = 0.0
+            features["gravity_bearish"] = 0.0
+
+        # Pivot Strength (sr_swing concept)
+        if "resistance_strength" in df.columns:
+            # Normalize strength to 0-1 (assume max 5 touches is "strong")
+            features["resistance_strength_norm"] = (df["resistance_strength"].clip(0, 5) / 5.0)
+            features["support_strength_norm"] = (df["support_strength"].clip(0, 5) / 5.0)
+        else:
+            features["resistance_strength_norm"] = 0.0
+            features["support_strength_norm"] = 0.0
+
+        # Pending Level Confirmation
+        if "pending_resistance" in df.columns:
+            # Normalize pending counts (assume max 10 pending levels)
+            features["pending_resistance_norm"] = (df["pending_resistance"].clip(0, 10) / 10.0)
+            features["pending_support_norm"] = (df["pending_support"].clip(0, 10) / 10.0)
+        else:
+            features["pending_resistance_norm"] = 0.0
+            features["pending_support_norm"] = 0.0
 
         # ===== HTF FEATURES (if provided) =====
         if htf_df is not None and self.include_htf:

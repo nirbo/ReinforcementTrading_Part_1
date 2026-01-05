@@ -222,34 +222,57 @@ class DataManager:
         timeframe: str,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
+        auto_aggregate: bool = True,
     ) -> pd.DataFrame:
         """
         Load OHLCV data from parquet.
 
+        For non-native timeframes (e.g., '9m'), will automatically aggregate
+        from 1m data if available and auto_aggregate=True.
+
         Args:
             symbol: Trading pair
-            timeframe: Candle timeframe
+            timeframe: Candle timeframe (supports custom like '9m')
             start: Optional start filter
             end: Optional end filter
+            auto_aggregate: If True, aggregate from 1m for non-native timeframes
 
         Returns:
             DataFrame with OHLCV data
         """
+        from src.crypto.config import TimeframeConfig
+
         path = self._get_parquet_path(symbol, timeframe)
 
-        if not path.exists():
-            logger.warning(f"No data found for {symbol} {timeframe}")
-            return pd.DataFrame()
+        # Try loading existing data first
+        if path.exists():
+            df = pd.read_parquet(path)
+            if not df.empty:
+                # Apply filters
+                if start is not None:
+                    df = df[df.index >= start]
+                if end is not None:
+                    df = df[df.index <= end]
+                return df
 
-        df = pd.read_parquet(path)
+        # No existing data - try aggregation for non-native timeframes
+        if auto_aggregate and not TimeframeConfig.is_native(timeframe):
+            # Import here to avoid circular imports
+            from src.crypto.aggregation import ensure_timeframe
 
-        # Apply filters
-        if start is not None:
-            df = df[df.index >= start]
-        if end is not None:
-            df = df[df.index <= end]
+            logger.info(f"Auto-aggregating {symbol} {timeframe} from 1m data")
+            df = ensure_timeframe(symbol, timeframe, self.config)
 
-        return df
+            if not df.empty:
+                # Apply filters
+                if start is not None:
+                    df = df[df.index >= start]
+                if end is not None:
+                    df = df[df.index <= end]
+                return df
+
+        logger.warning(f"No data found for {symbol} {timeframe}")
+        return pd.DataFrame()
 
     def get_bar_count(self, symbol: str, timeframe: str) -> int:
         """Get number of stored bars for symbol/timeframe."""

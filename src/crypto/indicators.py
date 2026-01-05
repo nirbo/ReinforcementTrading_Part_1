@@ -591,6 +591,316 @@ def atr_expansion(
     return atr_exp_bull, atr_exp_bear
 
 
+def darvas_box(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    lookback: int = 5,
+    confirmation_bars: int = 3,
+) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+    """
+    Darvas Box Theory detection.
+
+    Original sr_swing_strategy.py (lines 1175-1182):
+        box_state: 0=None, 1=Building Ceiling, 2=Building Floor, 3=Active
+        box_breakout_bull: close > box_top
+        box_breakout_bear: close < box_bottom
+
+    The Darvas Box identifies consolidation ranges and breakouts:
+    1. New high is made (N-period high)
+    2. Wait for 'confirmation_bars' consecutive bars that don't exceed the high = ceiling
+    3. Find the lowest low during ceiling confirmation = floor
+    4. Box is active when both top and bottom are established
+    5. Breakout occurs when price closes outside the box
+
+    Args:
+        high: High price series
+        low: Low price series
+        close: Close price series
+        lookback: Period for detecting new highs
+        confirmation_bars: Bars needed to confirm ceiling/floor
+
+    Returns:
+        (box_top, box_bottom, box_state, breakout_bull, breakout_bear)
+        - box_top: Current box ceiling price
+        - box_bottom: Current box floor price
+        - box_state: 0=None, 1=Building Ceiling, 2=Building Floor, 3=Active
+        - breakout_bull: Boolean series for bullish breakout
+        - breakout_bear: Boolean series for bearish breakout
+    """
+    n = len(high)
+    box_top = pd.Series(np.nan, index=high.index)
+    box_bottom = pd.Series(np.nan, index=high.index)
+    box_state = pd.Series(0, index=high.index)  # 0=None
+    breakout_bull = pd.Series(False, index=high.index)
+    breakout_bear = pd.Series(False, index=high.index)
+
+    # Rolling max for N-period high detection
+    rolling_max = high.rolling(window=lookback).max()
+
+    # State machine variables
+    current_top = np.nan
+    current_bottom = np.nan
+    state = 0  # 0=None, 1=Building Ceiling, 2=Building Floor, 3=Active
+    ceiling_bars = 0
+    floor_low = np.nan
+
+    for i in range(lookback, n):
+        curr_high = high.iloc[i]
+        curr_low = low.iloc[i]
+        curr_close = close.iloc[i]
+        prev_rolling_max = rolling_max.iloc[i - 1] if i > 0 else np.nan
+
+        if state == 0:  # No box
+            # Check for new N-period high
+            if not np.isnan(prev_rolling_max) and curr_high > prev_rolling_max:
+                current_top = curr_high
+                state = 1  # Start building ceiling
+                ceiling_bars = 0
+                floor_low = curr_low
+
+        elif state == 1:  # Building Ceiling
+            if curr_high > current_top:
+                # New high - reset ceiling
+                current_top = curr_high
+                ceiling_bars = 0
+                floor_low = curr_low
+            else:
+                ceiling_bars += 1
+                floor_low = min(floor_low, curr_low)
+                if ceiling_bars >= confirmation_bars:
+                    # Ceiling confirmed, start building floor
+                    state = 2
+                    current_bottom = floor_low
+
+        elif state == 2:  # Building Floor
+            if curr_high > current_top:
+                # Breakout during floor building - bullish
+                breakout_bull.iloc[i] = True
+                state = 0  # Reset
+                current_top = np.nan
+                current_bottom = np.nan
+            elif curr_low < current_bottom:
+                # Lower low - update floor
+                current_bottom = curr_low
+            else:
+                # Floor confirmed when no new lows for confirmation_bars
+                # For simplicity, consider floor active immediately after ceiling
+                state = 3  # Box active
+
+        elif state == 3:  # Active Box
+            if curr_close > current_top:
+                # Bullish breakout
+                breakout_bull.iloc[i] = True
+                # Start new box from this high
+                current_top = curr_high
+                state = 1
+                ceiling_bars = 0
+                floor_low = curr_low
+            elif curr_close < current_bottom:
+                # Bearish breakout
+                breakout_bear.iloc[i] = True
+                state = 0
+                current_top = np.nan
+                current_bottom = np.nan
+
+        # Store state
+        box_top.iloc[i] = current_top
+        box_bottom.iloc[i] = current_bottom
+        box_state.iloc[i] = state
+
+    return box_top, box_bottom, box_state, breakout_bull, breakout_bear
+
+
+def gravity_mode(
+    close: pd.Series,
+    rsi: pd.Series,
+    mfi: pd.Series,
+    trend_direction: pd.Series,
+    momentum_threshold: float = 50.0,
+    rsi_oversold: float = 30.0,
+    rsi_overbought: float = 70.0,
+) -> pd.Series:
+    """
+    Gravity Mode detection from sr_swing_strategy.py.
+
+    Original (lines 1487-1516):
+        Gravity Mode combines trend direction, RSI, and MFI to determine
+        market "gravity" - the dominant force pulling price:
+        - "Bullish": Strong upward bias
+        - "Bearish": Strong downward bias
+        - "Neutral": No clear bias
+
+    Args:
+        close: Close price series
+        rsi: RSI values
+        mfi: MFI values
+        trend_direction: Trend direction (1=bullish, -1=bearish, 0=neutral)
+        momentum_threshold: MFI threshold for momentum
+        rsi_oversold: RSI oversold level
+        rsi_overbought: RSI overbought level
+
+    Returns:
+        Series with values: "Bullish", "Bearish", "Neutral"
+    """
+    # Calculate momentum conditions
+    mfi_bullish = (mfi > momentum_threshold) & (mfi.diff() > 0)
+    mfi_bearish = (mfi < momentum_threshold) & (mfi.diff() < 0)
+
+    rsi_not_overbought = rsi < rsi_overbought
+    rsi_not_oversold = rsi > rsi_oversold
+
+    # Bullish gravity: trend bullish + MFI bullish + RSI not overbought
+    bullish = (trend_direction > 0) & mfi_bullish & rsi_not_overbought
+
+    # Bearish gravity: trend bearish + MFI bearish + RSI not oversold
+    bearish = (trend_direction < 0) & mfi_bearish & rsi_not_oversold
+
+    # Create result series
+    result = pd.Series("Neutral", index=close.index)
+    result[bullish] = "Bullish"
+    result[bearish] = "Bearish"
+
+    return result
+
+
+def pivot_strength(
+    pivot_high: pd.Series,
+    pivot_low: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    tolerance_pct: float = 0.2,
+    lookback: int = 100,
+) -> Tuple[pd.Series, pd.Series]:
+    """
+    Track pivot strength by counting touches per support/resistance level.
+
+    Original sr_swing_strategy.py concept:
+        More touches = stronger level = higher probability reaction
+
+    Args:
+        pivot_high: Series with pivot high prices (NaN where no pivot)
+        pivot_low: Series with pivot low prices (NaN where no pivot)
+        high: High price series
+        low: Low price series
+        tolerance_pct: Percentage tolerance for "touch" detection
+        lookback: How many bars back to count touches
+
+    Returns:
+        (resistance_strength, support_strength) - count of touches at each bar
+    """
+    n = len(high)
+    resistance_strength = pd.Series(0, index=high.index)
+    support_strength = pd.Series(0, index=high.index)
+
+    # Track all pivot levels
+    resistance_levels = []
+    support_levels = []
+
+    for i in range(n):
+        # Add new pivots to tracking
+        if not np.isnan(pivot_high.iloc[i]):
+            resistance_levels.append((i, pivot_high.iloc[i]))
+        if not np.isnan(pivot_low.iloc[i]):
+            support_levels.append((i, pivot_low.iloc[i]))
+
+        # Remove old levels outside lookback
+        resistance_levels = [(idx, lvl) for idx, lvl in resistance_levels if i - idx <= lookback]
+        support_levels = [(idx, lvl) for idx, lvl in support_levels if i - idx <= lookback]
+
+        # Count touches at current bar
+        curr_high = high.iloc[i]
+        curr_low = low.iloc[i]
+
+        r_touches = 0
+        for _, level in resistance_levels:
+            tolerance = level * tolerance_pct / 100
+            if abs(curr_high - level) <= tolerance:
+                r_touches += 1
+
+        s_touches = 0
+        for _, level in support_levels:
+            tolerance = level * tolerance_pct / 100
+            if abs(curr_low - level) <= tolerance:
+                s_touches += 1
+
+        resistance_strength.iloc[i] = r_touches
+        support_strength.iloc[i] = s_touches
+
+    return resistance_strength, support_strength
+
+
+def pending_level_confirmation(
+    close: pd.Series,
+    pivot_high: pd.Series,
+    pivot_low: pd.Series,
+    confirmation_bars: int = 3,
+    tolerance_pct: float = 0.3,
+) -> Tuple[pd.Series, pd.Series]:
+    """
+    Track pending level confirmations - levels waiting to be tested.
+
+    Original sr_swing_strategy.py concept:
+        A level becomes "confirmed" after price tests it multiple times
+        or after spending time near it.
+
+    Args:
+        close: Close price series
+        pivot_high: Pivot high series
+        pivot_low: Pivot low series
+        confirmation_bars: Bars needed near level to confirm
+        tolerance_pct: Percentage tolerance for "near level"
+
+    Returns:
+        (pending_resistance, pending_support) - number of pending confirmations
+    """
+    n = len(close)
+    pending_resistance = pd.Series(0, index=close.index)
+    pending_support = pd.Series(0, index=close.index)
+
+    # Track pending levels: (idx, price, bars_near)
+    pending_r_levels = []
+    pending_s_levels = []
+
+    for i in range(n):
+        curr_close = close.iloc[i]
+
+        # Add new pivots as pending
+        if not np.isnan(pivot_high.iloc[i]):
+            pending_r_levels.append([i, pivot_high.iloc[i], 0])
+        if not np.isnan(pivot_low.iloc[i]):
+            pending_s_levels.append([i, pivot_low.iloc[i], 0])
+
+        # Update pending resistance levels
+        new_pending_r = []
+        for level_data in pending_r_levels:
+            idx, level, bars_near = level_data
+            tolerance = level * tolerance_pct / 100
+            if abs(curr_close - level) <= tolerance:
+                bars_near += 1
+            if bars_near < confirmation_bars:
+                new_pending_r.append([idx, level, bars_near])
+            # If bars_near >= confirmation_bars, level is confirmed (removed from pending)
+        pending_r_levels = new_pending_r
+
+        # Update pending support levels
+        new_pending_s = []
+        for level_data in pending_s_levels:
+            idx, level, bars_near = level_data
+            tolerance = level * tolerance_pct / 100
+            if abs(curr_close - level) <= tolerance:
+                bars_near += 1
+            if bars_near < confirmation_bars:
+                new_pending_s.append([idx, level, bars_near])
+        pending_s_levels = new_pending_s
+
+        # Store counts
+        pending_resistance.iloc[i] = len(pending_r_levels)
+        pending_support.iloc[i] = len(pending_s_levels)
+
+    return pending_resistance, pending_support
+
+
 # =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
@@ -721,6 +1031,52 @@ def compute_all_indicators(
     # Volume relative to average
     result["volume_ratio"] = volume / volume.rolling(window=20).mean().replace(0, np.nan)
     result["volume_ratio"] = result["volume_ratio"].fillna(1.0).clip(0, 10)
+
+    # =========================================================================
+    # P2 FEATURES - Advanced SR Swing Strategy features
+    # =========================================================================
+
+    # Darvas Box Theory (sr_swing lines 1175-1182)
+    box_lookback = config.get("box_lookback", 5)
+    box_confirmation = config.get("box_confirmation_bars", 3)
+    result["box_top"], result["box_bottom"], result["box_state"], \
+        result["box_breakout_bull"], result["box_breakout_bear"] = darvas_box(
+            high, low, close, box_lookback, box_confirmation
+        )
+    # Box position: where price is within the box (0-1, NaN if no box)
+    box_range = (result["box_top"] - result["box_bottom"]).replace(0, np.nan)
+    result["box_position"] = (close - result["box_bottom"]) / box_range
+    result["box_position"] = result["box_position"].clip(0, 1).fillna(0.5)
+    # Box active flag
+    result["box_active"] = (result["box_state"] == 3).astype(float)
+
+    # Gravity Mode (sr_swing lines 1487-1516)
+    mfi_momentum_threshold = config.get("mfi_momentum_threshold", 50.0)
+    rsi_oversold = config.get("rsi_oversold", 30.0)
+    rsi_overbought = config.get("rsi_overbought", 70.0)
+    result["gravity_mode"] = gravity_mode(
+        close, result["rsi"], result["mfi"], result["trend_direction"],
+        mfi_momentum_threshold, rsi_oversold, rsi_overbought
+    )
+    # Encode gravity as numeric for RL
+    result["gravity_bullish"] = (result["gravity_mode"] == "Bullish").astype(float)
+    result["gravity_bearish"] = (result["gravity_mode"] == "Bearish").astype(float)
+
+    # Pivot Strength (touch count per level)
+    strength_tolerance = config.get("pivot_strength_tolerance_pct", 0.2)
+    strength_lookback = config.get("pivot_strength_lookback", 100)
+    result["resistance_strength"], result["support_strength"] = pivot_strength(
+        result["pivot_high"], result["pivot_low"], high, low,
+        strength_tolerance, strength_lookback
+    )
+
+    # Pending Level Confirmation
+    pending_confirmation_bars = config.get("pending_confirmation_bars", 3)
+    pending_tolerance = config.get("pending_tolerance_pct", 0.3)
+    result["pending_resistance"], result["pending_support"] = pending_level_confirmation(
+        close, result["pivot_high"], result["pivot_low"],
+        pending_confirmation_bars, pending_tolerance
+    )
 
     return result
 

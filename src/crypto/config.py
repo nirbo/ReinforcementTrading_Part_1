@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -64,13 +64,64 @@ class TimeframeConfig(BaseModel):
     ltf: str = "15m"  # Low timeframe for entries
     htf: str = "1h"   # High timeframe for trend
 
+    # Standard exchange timeframes (available directly from exchange)
+    EXCHANGE_NATIVE: ClassVar[List[str]] = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
+
     @field_validator("ltf", "htf")
     @classmethod
     def validate_timeframe(cls, v: str) -> str:
-        valid = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
-        if v not in valid:
-            raise ValueError(f"Invalid timeframe: {v}. Valid: {valid}")
-        return v
+        """
+        Validate timeframe format.
+
+        Supports:
+        - Exchange-native timeframes: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d
+        - Custom minute-based timeframes: 9m, 7m, etc. (aggregated from 1m)
+        - Custom hour-based timeframes: 3h, etc.
+        """
+        # Exchange-native timeframes
+        native = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
+        if v in native:
+            return v
+
+        # Custom minute-based (e.g., '9m', '7m')
+        if v.endswith("m"):
+            try:
+                minutes = int(v[:-1])
+                if 1 <= minutes <= 60:
+                    return v
+            except ValueError:
+                pass
+
+        # Custom hour-based (e.g., '3h')
+        if v.endswith("h"):
+            try:
+                hours = int(v[:-1])
+                if 1 <= hours <= 24:
+                    return v
+            except ValueError:
+                pass
+
+        raise ValueError(
+            f"Invalid timeframe: {v}. "
+            f"Use standard (1m,5m,15m,1h,...) or custom (Nm for minutes, Nh for hours)"
+        )
+
+    @classmethod
+    def is_native(cls, timeframe: str) -> bool:
+        """Check if timeframe is directly available from exchange."""
+        return timeframe in cls.EXCHANGE_NATIVE
+
+    @classmethod
+    def to_minutes(cls, timeframe: str) -> int:
+        """Convert timeframe string to minutes."""
+        if timeframe.endswith("m"):
+            return int(timeframe[:-1])
+        elif timeframe.endswith("h"):
+            return int(timeframe[:-1]) * 60
+        elif timeframe.endswith("d"):
+            return int(timeframe[:-1]) * 1440
+        else:
+            raise ValueError(f"Cannot parse timeframe: {timeframe}")
 
 
 class FeeConfig(BaseModel):
