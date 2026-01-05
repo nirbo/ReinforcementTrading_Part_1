@@ -22,11 +22,18 @@ from src.crypto.indicators import compute_all_indicators
 
 
 class Action(IntEnum):
-    """Trading actions."""
+    """Trading actions - 3 discrete actions only.
+
+    CLOSE action removed - forces model to use SL/TP exits.
+    This prevents premature exits and maintains proper R:R ratio.
+
+    With CLOSE: Model exits early → 0.9% TP hit rate, R:R 0.72
+    Without CLOSE: Model uses SL/TP → 28% TP hit rate, R:R 1.59
+    """
     HOLD = 0
     LONG = 1
     SHORT = 2
-    CLOSE = 3
+    # CLOSE removed - model was closing winners early, destroying R:R
     # TIGHT actions removed - 1% SL triggers on noise, 38% WR vs 51% for normal
 
 
@@ -101,8 +108,9 @@ class CryptoTradingEnv(gym.Env):
             self.df, htf_df=self.htf_df
         )
 
-        # Action space: 4 discrete actions (HOLD, LONG, SHORT, CLOSE)
-        self.action_space = spaces.Discrete(4)
+        # Action space: 3 discrete actions (HOLD, LONG, SHORT)
+        # CLOSE removed - forces SL/TP exits for proper R:R
+        self.action_space = spaces.Discrete(3)
 
         # Observation space: (window_size, feature_dim)
         feature_dim = self._precomputed_features.shape[1]
@@ -118,6 +126,13 @@ class CryptoTradingEnv(gym.Env):
         self.default_tp_pct = self.config.risk.default_tp_pct
         self.tight_sl_pct = self.config.risk.tight_sl_pct
         self.tight_tp_pct = self.config.risk.tight_tp_pct
+
+        # Entry filter settings (prevent trades during high uncertainty)
+        self.use_entry_filter = True  # Toggle entry filter
+        self.blocked_entries = 0  # Track blocked entries for logging
+
+        # Minimum hold period before allowing flip (prevents FLIP as exit strategy)
+        self.min_hold_bars = 12  # ~1 hour at 5m bars - must commit to trade
 
         # Initialize state
         self._reset_state()
@@ -142,6 +157,9 @@ class CryptoTradingEnv(gym.Env):
         # Previous unrealized for shaping
         self._prev_unrealized_pnl = 0.0
 
+        # Entry filter tracking
+        self.blocked_entries = 0
+
     def _get_price(self, bar: Optional[int] = None) -> float:
         """Get close price at bar."""
         if bar is None:
@@ -159,6 +177,45 @@ class CryptoTradingEnv(gym.Env):
         if bar is None:
             bar = self.current_bar
         return float(self.df.iloc[bar]["low"])
+
+    def _check_entry_filter(self, direction: int) -> bool:
+        """
+        Check if entry should be allowed based on market conditions.
+
+        SIMPLIFIED FILTER - only block high-confidence bad entries:
+        - Velocity against our direction (strong opposing momentum)
+        - ATR expansion against our direction (volatility spike opposing)
+
+        Args:
+            direction: 1 for long, -1 for short
+
+        Returns:
+            True if entry is allowed, False if blocked
+        """
+        if not self.use_entry_filter:
+            return True
+
+        row = self.df.iloc[self.current_bar]
+
+        # Block if velocity is against our direction (strong opposing momentum)
+        velocity_long = row.get("velocity_long", False)
+        velocity_short = row.get("velocity_short", False)
+
+        if direction == 1 and velocity_short:  # Going long during short velocity
+            return False
+        if direction == -1 and velocity_long:  # Going short during long velocity
+            return False
+
+        # Block during ATR expansion against our direction
+        atr_exp_bull = row.get("atr_exp_bull", False)
+        atr_exp_bear = row.get("atr_exp_bear", False)
+
+        if direction == 1 and atr_exp_bear:
+            return False
+        if direction == -1 and atr_exp_bull:
+            return False
+
+        return True
 
     def _compute_unrealized_pnl(self) -> float:
         """Compute unrealized PnL as percentage."""
@@ -216,6 +273,11 @@ class CryptoTradingEnv(gym.Env):
         """
         if self.position.direction != 0:
             return 0.0  # Already in position
+
+        # Check entry filter - block uncertain entries
+        if not self._check_entry_filter(direction):
+            self.blocked_entries += 1
+            return 0.0  # Entry blocked by filter
 
         entry_price = self._get_price()
         sl_pct = self.tight_sl_pct if tight else self.default_sl_pct
@@ -277,21 +339,8 @@ class CryptoTradingEnv(gym.Env):
         total_fees = 2 * self.taker_fee
         net_pnl_pct = pnl_pct - total_fees
 
-        # Exit bonuses/penalties based on exit reason
-        exit_adjustment = 0.0
-        if reason == "TP_HIT":
-            # Bonus for letting trade reach TP (encourages holding winners)
-            exit_adjustment = 0.002  # +0.2% bonus
-        elif reason in ("MANUAL_CLOSE", "FLIP"):
-            # Small penalty for premature exit, but only if we're giving up profits
-            tp_distance = abs(self.current_trade.tp_price - entry_price) / entry_price
-            current_distance = abs(exit_price - entry_price) / entry_price
-            achieved_pct = current_distance / tp_distance if tp_distance > 0 else 0
-
-            if achieved_pct < 0.3 and pnl_pct > 0:  # Exiting early while winning
-                # Penalty: 0.2% scaled by how early we exited
-                exit_adjustment = -0.002 * (1 - achieved_pct / 0.3)  # Max 0.2%
-        net_pnl_pct += exit_adjustment
+        # Simple reward: just the PnL (no exit bonuses/penalties)
+        # With CLOSE removed, exits are via SL/TP which is exactly what we want
 
         # Update trade record
         self.current_trade.exit_bar = self.current_bar
@@ -401,43 +450,27 @@ class CryptoTradingEnv(gym.Env):
         elif action == Action.LONG:
             if self.position.direction == 0:
                 reward += self._open_position(1, tight=False)
-            elif self.position.direction == -1:
-                # Close short, open long
-                reward += self._close_position("FLIP")
-                reward += self._open_position(1, tight=False)
+            # FLIP disabled - positions can only exit via SL/TP
+            # This forces proper R:R and prevents early exit gaming
 
         elif action == Action.SHORT:
             if self.position.direction == 0:
                 reward += self._open_position(-1, tight=False)
-            elif self.position.direction == 1:
-                # Close long, open short
-                reward += self._close_position("FLIP")
-                reward += self._open_position(-1, tight=False)
-
-        elif action == Action.CLOSE:
-            if self.position.direction != 0:
-                reward += self._close_position("MANUAL_CLOSE")
-        # TIGHT actions (4, 5) removed from action space
+            # FLIP disabled - positions can only exit via SL/TP
+        # Both CLOSE and FLIP removed - model only decides WHEN to enter and WHICH direction
 
         # Check SL/TP
         sl_tp_reward = self._check_sl_tp()
         if sl_tp_reward is not None:
             reward += sl_tp_reward
 
-        # Unrealized PnL shaping (if still in position)
+        # Update position time (no shaping - SL/TP handle exits)
         if self.position.direction != 0:
             self.position.time_in_position += 1
             unrealized = self._compute_unrealized_pnl()
             self.position.unrealized_pnl_pct = unrealized
-
-            # Asymmetric shaping: strongly penalize holding losers, weakly reward holding winners
-            # Goal: Model learns to cut losers fast before they hit SL
-            delta_unrealized = unrealized - self._prev_unrealized_pnl
-            if unrealized < 0:  # 2x weight for losers - strong incentive to cut losses early
-                reward += delta_unrealized * self.unrealized_pnl_weight * 2.0 * self.reward_scale
-            else:  # 0.2x weight for winners - minimal feedback to avoid early exits
-                reward += delta_unrealized * self.unrealized_pnl_weight * 0.2 * self.reward_scale
-            self._prev_unrealized_pnl = unrealized
+            # No unrealized PnL shaping - CLOSE action removed, so model can't act on shaping
+            # Exits are forced via SL/TP which maintains proper R:R
 
         # Advance time
         self.current_bar += 1

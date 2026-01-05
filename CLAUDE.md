@@ -323,29 +323,49 @@ Migrate existing Forex PPO trading system to crypto perpetual futures trading on
 
 ## Reward Engineering Learnings
 
-### Policy Collapse Prevention
-- **Problem**: If reward structure is too punishing, model learns to never trade
-- **Symptoms**: 100% HOLD/CLOSE actions, 0 trades in evaluation
-- **Fix**: Balance positive and negative signals - some reward for holding winners
+### CRITICAL: Remove CLOSE Action (Breakthrough!)
 
-### Asymmetric Shaping (Critical!)
-Unrealized PnL shaping must be asymmetric:
-- **Losers**: 2.0x weight - strong penalty to cut losses before SL hit
-- **Winners**: 0.2x weight - minimal feedback to avoid closing profitable trades early
-- **Why**: Symmetric shaping rewarded closing winners to "lock in" shaping reward
+**Problem Found**: With CLOSE action, model exits 85.7% of trades early via MANUAL_CLOSE:
+- Avg win: +0.80% (should be +6% at TP)
+- Avg loss: -1.12% (model cuts losers, but also winners)
+- R:R: 0.72:1 (inverted from 2:1 target)
+- TP hit rate: 0.9% (almost never)
+- Result: **-328% total loss**
 
-### Exit Bonuses/Penalties
-- **TP Hit**: +0.2% bonus (encourages holding winners to TP)
-- **Premature exit**: -0.2% max penalty if closing winner before 30% of TP
+**Solution**: Remove CLOSE action entirely (3 actions: HOLD, LONG, SHORT):
+- Forces model to use SL/TP for exits
+- Avg win: +4.89% (trades run to TP)
+- Avg loss: -3.08% (full SL, as designed)
+- R:R: 1.59:1 (close to 2:1 target)
+- TP hit rate: 28% (30x improvement!)
+- Result: **+1.2% profit** (PROFITABLE!)
 
-### Exit Reason Analysis
-Always analyze trades by exit reason during evaluation:
+**Action Space (Current)**:
+```python
+class Action(IntEnum):
+    HOLD = 0   # No action
+    LONG = 1   # Open long (only when flat)
+    SHORT = 2  # Open short (only when flat)
+    # CLOSE removed - forces SL/TP exits
+    # FLIP disabled - prevents early exit gaming
 ```
-MANUAL_CLOSE: Model's discretionary exits - often profitable
-SL_HIT: Where losses accumulate - want to minimize (<20%)
-TP_HIT: Goal exits - want to maximize
-FLIP: Direction changes - usually profitable
-```
+
+### FLIP Must Also Be Disabled
+
+After removing CLOSE, model learned to use FLIP (LONG→SHORT) as exit:
+- 91.8% of trades were FLIP exits
+- Still avoided SL/TP, destroying R:R
+
+With FLIP disabled (positions only exit via SL/TP):
+- R:R restored: 1.89:1
+- TP hit rate: 34.3%
+- Old model was 0.2% WR away from profitability!
+
+### Entry Filter (Simplified)
+
+Block entries during high uncertainty:
+- Velocity against direction (strong opposing momentum)
+- ATR expansion against direction (volatility spike)
 
 ### SL/TP Sizing for 5m Crypto
 - ATR averages ~0.47% of price for SUI
@@ -353,10 +373,36 @@ FLIP: Direction changes - usually profitable
 - 6% TP maintains 2:1 R:R ratio
 
 ### Key Metrics to Watch
-1. **SL hit rate** - Should be <20%
-2. **TP hit rate** - Should increase with better entries
-3. **MANUAL_CLOSE stats** - If profitable, model learned good discretionary exits
-4. **Action distribution** - Should see LONG/SHORT, not just HOLD/CLOSE
+1. **TP hit rate** - Target >35% (38.3% achieved)
+2. **SL hit rate** - ~60% is OK with 2:1 R:R
+3. **R:R ratio** - Target >1.8:1 (1.86 achieved)
+4. **Win Rate** - Need >35% with 1.86 R:R (39.1% achieved)
+5. **Profit Factor** - Target >1.0 (1.19 achieved)
+
+### Final Results (January 2026)
+
+**Trained on SOL/USDT, 5m timeframe:**
+| Metric | Value |
+|--------|-------|
+| Win Rate | 39.1% |
+| Profit Factor | 1.19 |
+| R:R Ratio | 1.86:1 |
+| Final Equity | +41.4% |
+| Expectancy | +0.36%/trade |
+
+**Generalization:**
+| Pair | PF | PnL |
+|------|-----|------|
+| SOL (trained) | 1.19 | +46.7% |
+| BNB | 1.04 | +6.8% |
+| SUI | 0.92 | -27.9% |
+| LINK | 0.93 | -21.9% |
+
+### What NOT to Do
+- **Don't use unrealized PnL shaping** - Model can't act on it without CLOSE
+- **Don't add CLOSE back** - It destroys R:R ratio
+- **Don't enable FLIP** - Model uses it to exit early, destroying R:R
+- **Don't use asymmetric shaping** - Only relevant with CLOSE action
 
 ---
 
