@@ -60,7 +60,7 @@ indicators:
   bb_length: 20
   bb_mult: 2.0
 training:
-  total_timesteps: 5000000  # 5M steps - more exploration with higher entropy
+  total_timesteps: 10000000  # 10M steps - SL rate improved, need more convergence
   learning_rate: 0.0001  # Lower for stability with 5M steps (was 3e-4)
   n_steps: 2048
   batch_size: 512
