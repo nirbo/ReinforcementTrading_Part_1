@@ -60,7 +60,7 @@ indicators:
   bb_length: 20
   bb_mult: 2.0
 training:
-  total_timesteps: 2000000  # 2M steps for better convergence
+  total_timesteps: 5000000  # 5M steps - more exploration with higher entropy
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 512
@@ -68,7 +68,7 @@ training:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.02  # Higher entropy for more exploration of entry patterns
   vf_coef: 0.5
   max_grad_norm: 0.5
   net_arch:
