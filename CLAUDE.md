@@ -272,13 +272,13 @@ Migrate existing Forex PPO trading system to crypto perpetual futures trading on
 | Filters | rsi_zones, macd_signals, bb_position, mtf_aligned | 6 |
 | Position | direction, unrealized_pnl_pct, time_in_position | 3 |
 
-**Action Space (6 discrete):**
+**Action Space (4 discrete):**
 - 0: HOLD - No action
 - 1: LONG - Open long position
 - 2: SHORT - Open short position
 - 3: CLOSE - Close existing position
-- 4: LONG_TIGHT - Long with tight SL/TP (momentum play)
-- 5: SHORT_TIGHT - Short with tight SL/TP (momentum play)
+- ~~4: LONG_TIGHT~~ - Removed (1% SL triggered on noise, 38% WR vs 51% normal)
+- ~~5: SHORT_TIGHT~~ - Removed (same issue)
 
 **Training Metrics to Monitor:**
 - `ep_rew_mean` - Episode reward, should increase over training
@@ -318,6 +318,45 @@ Migrate existing Forex PPO trading system to crypto perpetual futures trading on
 - **Trend Filters:** HMA direction, Kalman filter, MTF alignment
 - **Exit:** Risk:reward 2:1 or 3:1, trailing stop optional
 - **Filters:** RSI zones, MACD signals, BB position
+
+---
+
+## Reward Engineering Learnings
+
+### Policy Collapse Prevention
+- **Problem**: If reward structure is too punishing, model learns to never trade
+- **Symptoms**: 100% HOLD/CLOSE actions, 0 trades in evaluation
+- **Fix**: Balance positive and negative signals - some reward for holding winners
+
+### Asymmetric Shaping (Critical!)
+Unrealized PnL shaping must be asymmetric:
+- **Losers**: 2.0x weight - strong penalty to cut losses before SL hit
+- **Winners**: 0.2x weight - minimal feedback to avoid closing profitable trades early
+- **Why**: Symmetric shaping rewarded closing winners to "lock in" shaping reward
+
+### Exit Bonuses/Penalties
+- **TP Hit**: +0.2% bonus (encourages holding winners to TP)
+- **Premature exit**: -0.2% max penalty if closing winner before 30% of TP
+
+### Exit Reason Analysis
+Always analyze trades by exit reason during evaluation:
+```
+MANUAL_CLOSE: Model's discretionary exits - often profitable
+SL_HIT: Where losses accumulate - want to minimize (<20%)
+TP_HIT: Goal exits - want to maximize
+FLIP: Direction changes - usually profitable
+```
+
+### SL/TP Sizing for 5m Crypto
+- ATR averages ~0.47% of price for SUI
+- 3% SL = 6.3x ATR (reasonable room)
+- 6% TP maintains 2:1 R:R ratio
+
+### Key Metrics to Watch
+1. **SL hit rate** - Should be <20%
+2. **TP hit rate** - Should increase with better entries
+3. **MANUAL_CLOSE stats** - If profitable, model learned good discretionary exits
+4. **Action distribution** - Should see LONG/SHORT, not just HOLD/CLOSE
 
 ---
 
