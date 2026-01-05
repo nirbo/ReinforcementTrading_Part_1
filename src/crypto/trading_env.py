@@ -277,17 +277,21 @@ class CryptoTradingEnv(gym.Env):
         total_fees = 2 * self.taker_fee
         net_pnl_pct = pnl_pct - total_fees
 
-        # Premature exit penalty: discourage closing before reaching TP zone
-        premature_penalty = 0.0
-        if reason in ("MANUAL_CLOSE", "FLIP"):
+        # Exit bonuses/penalties based on exit reason
+        exit_adjustment = 0.0
+        if reason == "TP_HIT":
+            # Bonus for letting trade reach TP (encourages holding winners)
+            exit_adjustment = 0.002  # +0.2% bonus
+        elif reason in ("MANUAL_CLOSE", "FLIP"):
+            # Small penalty for premature exit, but only if we're giving up profits
             tp_distance = abs(self.current_trade.tp_price - entry_price) / entry_price
             current_distance = abs(exit_price - entry_price) / entry_price
             achieved_pct = current_distance / tp_distance if tp_distance > 0 else 0
 
-            if achieved_pct < 0.5:  # Closed before reaching 50% of TP
-                # Penalty: 0.5% scaled by how early we exited
-                premature_penalty = 0.005 * (1 - achieved_pct * 2)  # Max 0.5% at 0%, 0% at 50%
-                net_pnl_pct -= premature_penalty
+            if achieved_pct < 0.3 and pnl_pct > 0:  # Exiting early while winning
+                # Penalty: 0.2% scaled by how early we exited
+                exit_adjustment = -0.002 * (1 - achieved_pct / 0.3)  # Max 0.2%
+        net_pnl_pct += exit_adjustment
 
         # Update trade record
         self.current_trade.exit_bar = self.current_bar
@@ -426,11 +430,13 @@ class CryptoTradingEnv(gym.Env):
             unrealized = self._compute_unrealized_pnl()
             self.position.unrealized_pnl_pct = unrealized
 
-            # ASYMMETRIC shaping: only penalize holding losers, don't reward holding winners
-            # This prevents the model from closing winners early to "lock in" shaping reward
+            # Asymmetric shaping: penalize holding losers more than rewarding holding winners
+            # This reduces incentive to close winners early while still punishing holding losers
             delta_unrealized = unrealized - self._prev_unrealized_pnl
-            if unrealized < 0:  # Only apply when losing
+            if unrealized < 0:  # Full weight for losers - incentivize cutting losses
                 reward += delta_unrealized * self.unrealized_pnl_weight * self.reward_scale
+            else:  # Reduced weight for winners - some feedback but less incentive to close
+                reward += delta_unrealized * self.unrealized_pnl_weight * 0.3 * self.reward_scale
             self._prev_unrealized_pnl = unrealized
 
         # Advance time
