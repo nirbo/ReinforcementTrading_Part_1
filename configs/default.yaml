@@ -27,8 +27,8 @@ risk:
   max_concurrent_positions: 1
   cooldown_bars: 3
   max_trades_per_day: 50
-  default_sl_pct: 0.02
-  default_tp_pct: 0.04
+  default_sl_pct: 0.03    # 3% SL (was 2%) - more room for 5m volatility
+  default_tp_pct: 0.06    # 6% TP (was 4%) - maintain 2:1 R:R
   tight_sl_pct: 0.01
   tight_tp_pct: 0.015
   min_sl_pct: 0.005
@@ -60,7 +60,7 @@ indicators:
   bb_length: 20
   bb_mult: 2.0
 training:
-  total_timesteps: 1000000
+  total_timesteps: 2000000  # 2M steps for better convergence
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 512
