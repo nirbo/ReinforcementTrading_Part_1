@@ -476,7 +476,17 @@ class CryptoTradingEnv(gym.Env):
     def get_trade_stats(self) -> Dict[str, Any]:
         """Get trading statistics."""
         if not self.trades:
-            return {"n_trades": 0}
+            return {
+                "n_trades": 0,
+                "win_rate": 0.0,
+                "avg_pnl": 0.0,
+                "total_pnl": 0.0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+                "profit_factor": 0.0,
+                "max_drawdown": 0.0,
+                "final_equity": self.equity,
+            }
 
         pnls = [t.net_pnl_pct for t in self.trades]
         wins = [p for p in pnls if p > 0]
