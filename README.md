@@ -77,14 +77,15 @@ python scripts/diagnose_model.py --model models/best/ppo_crypto_final.zip --data
 5. [Configuration System](#configuration-system)
 6. [Technical Indicators](#technical-indicators)
 7. [Feature Extraction](#feature-extraction)
-8. [Trading Environment](#trading-environment)
-9. [Training Pipeline](#training-pipeline)
-10. [Backtesting Engine](#backtesting-engine)
-11. [Data Management](#data-management)
-12. [Critical Learnings](#critical-learnings)
-13. [API Reference](#api-reference)
-14. [Testing](#testing)
-15. [Examples](#examples)
+8. [Box Features (Intraday Strategy)](#box-features-intraday-strategy)
+9. [Trading Environment](#trading-environment)
+10. [Training Pipeline](#training-pipeline)
+11. [Backtesting Engine](#backtesting-engine)
+12. [Data Management](#data-management)
+13. [Critical Learnings](#critical-learnings)
+14. [API Reference](#api-reference)
+15. [Testing](#testing)
+16. [Examples](#examples)
 
 ---
 
@@ -103,7 +104,8 @@ This system trains a PPO (Proximal Policy Optimization) agent to trade cryptocur
 | Feature | Description |
 |---------|-------------|
 | **Multi-Timeframe Analysis** | LTF (5m) for entries, HTF (9m) for trend confirmation |
-| **39+ Normalized Features** | Scale-invariant, bounded features for stable learning |
+| **76+ Normalized Features** | Scale-invariant, bounded features for stable learning |
+| **Box Features (Optional)** | +20 intraday session high/low tracking features |
 | **3 Discrete Actions** | HOLD, LONG, SHORT (CLOSE removed - see Critical Learnings) |
 | **Forced SL/TP Exits** | Positions ONLY exit via stop-loss or take-profit |
 | **Dynamic Fees** | Real-time fee fetching from ByBit API |
@@ -198,11 +200,16 @@ LINK/USDT:USDT
 ```
 ReinforcementTrading_Part_1/
 ├── configs/
-│   └── default.yaml          # Default configuration
+│   ├── default.yaml          # Default configuration (no box features)
+│   └── box_features.yaml     # Box features enabled config
 ├── data/
 │   ├── raw/                  # Raw OHLCV parquet files
 │   └── processed/            # Processed feature data
 ├── models/                   # Trained models (gitignored)
+├── scripts/
+│   ├── train_baseline.py     # Train without box features
+│   ├── train_box_features.py # Train with box features
+│   └── train_sequential.sh   # Run both trainings sequentially
 ├── src/
 │   └── crypto/
 │       ├── __init__.py       # Package exports
@@ -210,6 +217,7 @@ ReinforcementTrading_Part_1/
 │       ├── data_manager.py   # CCXT + Parquet storage
 │       ├── indicators.py     # Technical analysis library
 │       ├── feature_extractor.py  # RL feature engineering
+│       ├── box_features.py   # Intraday box strategy features
 │       ├── trading_env.py    # Gymnasium environment
 │       ├── train.py          # PPO training pipeline
 │       └── evaluate.py       # Backtesting engine
@@ -218,6 +226,7 @@ ReinforcementTrading_Part_1/
 │   ├── test_config.py
 │   ├── test_indicators.py
 │   ├── test_features.py
+│   ├── test_box_features.py  # Box features tests (108+ tests)
 │   ├── test_env.py
 │   ├── test_train.py
 │   └── test_evaluate.py
@@ -744,6 +753,120 @@ obs = extractor.get_observation(ohlcv_df, current_idx=100, position=position)
 # Precompute all features
 feature_matrix = extractor.precompute_features(ohlcv_df)
 # feature_matrix.shape: (n_bars, feature_dim)
+```
+
+---
+
+## Box Features (Intraday Strategy)
+
+The system includes an optional **Intraday Dynamic Box Strategy** that tracks session high/low levels for additional trading signals. This adds 20 features to the observation space.
+
+### Concept
+
+The "box" represents the trading range established during each UTC trading day:
+- **Box High**: Session high (resistance)
+- **Box Low**: Session low (support)
+- **Box Mid**: Midpoint between high and low
+
+These levels are tracked dynamically and reset at UTC midnight (session boundary).
+
+### Box Features (20 total)
+
+| Category | Feature | Description | Range |
+|----------|---------|-------------|-------|
+| **Levels** | `box_high_dist` | Distance to box high / ATR | [-3, 3] |
+| | `box_low_dist` | Distance to box low / ATR | [-3, 3] |
+| | `box_mid_dist` | Distance to box mid / ATR | [-3, 3] |
+| | `box_range_atr` | Box range / ATR | [0, 5] |
+| **Zone** | `zone_upper` | Price in upper third | [0, 1] |
+| | `zone_middle` | Price in middle third | [0, 1] |
+| | `zone_lower` | Price in lower third | [0, 1] |
+| | `zone_position` | Normalized position in box | [0, 1] |
+| **Touches** | `high_touch_count` | Touches of box high (normalized) | [0, 1] |
+| | `low_touch_count` | Touches of box low (normalized) | [0, 1] |
+| | `at_high` | Currently at box high | [0, 1] |
+| | `at_low` | Currently at box low | [0, 1] |
+| **Breakout** | `above_box` | Price above box high | [0, 1] |
+| | `below_box` | Price below box low | [0, 1] |
+| | `breakout_strength` | Breakout distance / ATR | [0, 3] |
+| | `breakout_volume` | Volume ratio during breakout | [0, 3] |
+| **Validation** | `hh_count` | Higher highs in session | [0, 1] |
+| | `ll_count` | Lower lows in session | [0, 1] |
+| | `trend_with_box` | Session trend alignment | [-1, 1] |
+| | `box_age_normalized` | Bars since session start | [0, 1] |
+
+### Configuration
+
+Enable box features in your config YAML:
+
+```yaml
+# configs/box_features.yaml
+box_features:
+  use_box_features: true        # Enable box features (adds 20 to observation)
+  box_warmup_bars: 30           # Bars before features are valid
+  box_touch_tolerance_pct: 0.001  # 0.1% tolerance for touch detection
+```
+
+### Observation Space Impact
+
+| Config | Base Features | Box Features | Position | Total |
+|--------|---------------|--------------|----------|-------|
+| `default.yaml` | 76 | 0 | 3 | 79 |
+| `box_features.yaml` | 76 | 20 | 3 | 99 |
+
+### Session Boundaries
+
+Box state resets at UTC midnight (new trading day):
+- Session ID is computed from timestamp: `timestamp.date()`
+- When session changes, box reinitializes with first bar's OHLC
+- Episodes continue across session boundaries (box resets, episode doesn't)
+
+### Usage
+
+```python
+from src.crypto.config import load_config
+from src.crypto.feature_extractor import FeatureExtractor
+
+# Load config with box features enabled
+config = load_config("configs/box_features.yaml")
+
+# Feature extractor automatically includes box features
+extractor = FeatureExtractor(config, window_size=30)
+print(f"Feature dim: {extractor.feature_dim}")  # 76 base + 20 box = 96
+
+# Box features are computed dynamically in the environment
+# Session boundaries trigger box state reset
+```
+
+### Training Comparison
+
+To compare model performance with and without box features:
+
+```bash
+# Train baseline (no box features) - 10M steps
+python scripts/train_baseline.py
+
+# Train with box features - 15M steps (larger state space)
+python scripts/train_box_features.py
+
+# Compare results
+python scripts/compare_experiments.py models/baseline_no_box/ models/with_box_features/
+```
+
+### Implementation Details
+
+The box feature system consists of:
+
+1. **BoxState** (`src/crypto/box_features.py`): Tracks session high/low/mid levels
+2. **BoxFeatureExtractor**: Computes all 20 box features from current state
+3. **Session Detection** (`DataManager.add_session_boundaries`): Adds `session_id` column
+4. **Environment Integration**: Box state updates in `step()`, resets on session change
+
+```python
+# Box state lifecycle
+env.reset()  # Initializes box with session's first bar
+env.step()   # Updates box high/low if new extremes
+             # Resets box if session boundary crossed
 ```
 
 ---
