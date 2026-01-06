@@ -1,14 +1,16 @@
 """Tests for intraday box strategy features.
 
-This module tests session boundary detection and related box feature components.
+This module tests session boundary detection, BoxState, and related box feature components.
 """
 
+import json
 import numpy as np
 import pandas as pd
 import pytest
 from datetime import date
 
 from src.crypto.data_manager import DataManager
+from src.crypto.box_features import BoxState, Zone
 
 
 class TestSessionBoundaryDetection:
@@ -388,3 +390,314 @@ class TestLoadOhlcvWithSessionInfo:
         assert "session_id" in df.columns
         assert "session_start" in df.columns
         assert "session_date" in df.columns
+
+
+class TestBoxState:
+    """Tests for BoxState dataclass."""
+
+    def test_initialization_defaults(self):
+        """Test BoxState initializes with correct defaults."""
+        state = BoxState()
+
+        assert state.session_high == 0.0
+        assert state.session_low == float('inf')
+        assert state.session_open == 0.0
+        assert state.high_touch_count == 0
+        assert state.low_touch_count == 0
+        assert state.mid_touch_count == 0
+        assert state.broke_high == False
+        assert state.broke_low == False
+        assert state.bar_count == 0
+        assert not state.is_valid
+
+    def test_reset_initializes_state(self):
+        """Test reset() properly initializes with first bar data."""
+        state = BoxState()
+        state.reset(first_open=100.0, first_high=105.0, first_low=95.0)
+
+        assert state.session_high == 105.0
+        assert state.session_low == 95.0
+        assert state.session_open == 100.0
+        assert state.bar_count == 1
+        assert state.is_valid
+        assert state.box_mid == 100.0
+        assert state.box_height == 10.0
+
+    def test_reset_clears_previous_state(self):
+        """Test reset() clears all accumulated state."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        # Accumulate some state
+        state.update(106.0, 96.0, 100.0)
+        state.high_touch_count = 3
+        state.broke_high = True
+
+        # Reset
+        state.reset(200.0, 210.0, 190.0)
+
+        assert state.session_high == 210.0
+        assert state.session_low == 190.0
+        assert state.high_touch_count == 0
+        assert state.broke_high == False
+        assert state.bar_count == 1
+
+    def test_update_expands_box(self):
+        """Test update() expands box when new highs/lows are made."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        # New high
+        state.update(110.0, 100.0, 108.0)
+        assert state.session_high == 110.0
+        assert state.session_low == 95.0
+
+        # New low
+        state.update(105.0, 90.0, 92.0)
+        assert state.session_high == 110.0
+        assert state.session_low == 90.0
+
+    def test_box_never_shrinks(self):
+        """Test that box boundaries never shrink within session."""
+        state = BoxState()
+        state.reset(100.0, 110.0, 90.0)
+
+        # Update with smaller range
+        state.update(105.0, 95.0, 100.0)
+
+        # Box should not shrink
+        assert state.session_high == 110.0
+        assert state.session_low == 90.0
+
+    def test_touch_detection_with_hysteresis(self):
+        """Test touch detection counts once per approach."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        # Price at high (tolerance 1% of 10 = 0.1)
+        state.update(105.0, 104.0, 104.95, tolerance_pct=0.01)
+        assert state.high_touch_count == 1
+
+        # Still at high - should not count again
+        state.update(105.0, 104.0, 104.96, tolerance_pct=0.01)
+        assert state.high_touch_count == 1
+
+        # Move away
+        state.update(103.0, 101.0, 102.0, tolerance_pct=0.01)
+        assert state.high_touch_count == 1
+
+        # Return to high - should count as new touch
+        state.update(105.0, 104.0, 104.95, tolerance_pct=0.01)
+        assert state.high_touch_count == 2
+
+    def test_touch_count_capped(self):
+        """Test touch counts are capped at MAX_TOUCH_COUNT."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        # Simulate 10 touches to high
+        for i in range(10):
+            # Touch
+            state.update(105.0, 104.0, 104.95, tolerance_pct=0.01)
+            # Move away
+            state.update(102.0, 100.0, 101.0, tolerance_pct=0.01)
+
+        # Should be capped at 5
+        assert state.high_touch_count == state.MAX_TOUCH_COUNT
+
+    def test_breakout_state_sticky(self):
+        """Test that broke_high/broke_low are sticky flags."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        # Break above high
+        state.update(110.0, 106.0, 108.0)
+        assert state.broke_high == True
+
+        # Come back inside box
+        state.update(104.0, 100.0, 102.0)
+        assert state.broke_high == True  # Still true!
+
+        # Break below low
+        state.update(94.0, 90.0, 92.0)
+        assert state.broke_low == True
+        assert state.broke_high == True  # Both true
+
+    def test_zone_classification_above_box(self):
+        """Test zone classification when price is above box."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        zone = state.update(110.0, 106.0, 108.0, tolerance_pct=0.01)
+        assert zone == Zone.ABOVE_BOX
+
+    def test_zone_classification_below_box(self):
+        """Test zone classification when price is below box."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        zone = state.update(94.0, 90.0, 92.0, tolerance_pct=0.01)
+        assert zone == Zone.BELOW_BOX
+
+    def test_zone_classification_upper(self):
+        """Test zone classification when price in upper zone."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)  # mid = 100
+
+        zone = state.update(104.0, 101.0, 102.0, tolerance_pct=0.01)
+        assert zone == Zone.UPPER
+
+    def test_zone_classification_lower(self):
+        """Test zone classification when price in lower zone."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)  # mid = 100
+
+        zone = state.update(99.0, 96.0, 98.0, tolerance_pct=0.01)
+        assert zone == Zone.LOWER
+
+    def test_zone_classification_at_high(self):
+        """Test zone classification at high level."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        zone = state.update(105.5, 104.5, 105.05, tolerance_pct=0.01)
+        assert zone == Zone.AT_HIGH
+
+    def test_zone_classification_at_low(self):
+        """Test zone classification at low level."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        zone = state.update(95.5, 94.5, 94.95, tolerance_pct=0.01)
+        assert zone == Zone.AT_LOW
+
+    def test_zone_classification_at_mid(self):
+        """Test zone classification at mid level."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)  # mid = 100
+
+        zone = state.update(100.5, 99.5, 100.05, tolerance_pct=0.01)
+        assert zone == Zone.AT_MID
+
+    def test_bars_since_touch_tracking(self):
+        """Test bars_since_*_touch methods."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        # No touches yet
+        assert state.bars_since_high_touch() == -1
+
+        # Touch high
+        state.update(105.0, 104.0, 104.95, tolerance_pct=0.01)
+        assert state.bars_since_high_touch() == 0
+
+        # Move away (2 bars)
+        state.update(102.0, 100.0, 101.0, tolerance_pct=0.01)
+        state.update(101.0, 99.0, 100.0, tolerance_pct=0.01)
+        assert state.bars_since_high_touch() == 2
+
+    def test_serialization_to_dict(self):
+        """Test to_dict() serialization."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+        # Touch the high first (close within tolerance of 105.0)
+        state.update(105.0, 104.0, 104.95, tolerance_pct=0.01)  # Touch
+        # Then break above
+        state.update(110.0, 106.0, 108.0, tolerance_pct=0.01)  # Breakout
+
+        data = state.to_dict()
+
+        assert data["session_high"] == 110.0
+        assert data["session_low"] == 95.0
+        assert data["high_touch_count"] == 1
+        assert data["broke_high"] == True
+        assert data["bar_count"] == 3
+
+    def test_deserialization_from_dict(self):
+        """Test from_dict() deserialization."""
+        data = {
+            "session_high": 110.0,
+            "session_low": 90.0,
+            "session_open": 100.0,
+            "high_touch_count": 3,
+            "low_touch_count": 2,
+            "mid_touch_count": 1,
+            "broke_high": True,
+            "broke_low": False,
+            "last_zone": "upper",
+            "bar_count": 50,
+            "_is_touching_high": False,
+            "_is_touching_low": False,
+            "_is_touching_mid": True,
+            "_last_high_touch_bar": 45,
+            "_last_low_touch_bar": 30,
+            "_last_mid_touch_bar": 50,
+        }
+
+        state = BoxState.from_dict(data)
+
+        assert state.session_high == 110.0
+        assert state.session_low == 90.0
+        assert state.high_touch_count == 3
+        assert state.broke_high == True
+        assert state.last_zone == Zone.UPPER
+        assert state.bar_count == 50
+
+    def test_json_round_trip(self):
+        """Test JSON serialization round-trip preserves state."""
+        original = BoxState()
+        original.reset(100.0, 110.0, 90.0)
+        original.update(112.0, 108.0, 111.0, tolerance_pct=0.01)
+        original.update(105.0, 102.0, 103.0, tolerance_pct=0.01)
+
+        # Round-trip
+        json_str = original.to_json()
+        restored = BoxState.from_json(json_str)
+
+        assert restored.session_high == original.session_high
+        assert restored.session_low == original.session_low
+        assert restored.high_touch_count == original.high_touch_count
+        assert restored.broke_high == original.broke_high
+        assert restored.bar_count == original.bar_count
+
+    def test_repr_string(self):
+        """Test __repr__ produces readable output."""
+        state = BoxState()
+        state.reset(100.0, 105.0, 95.0)
+
+        repr_str = repr(state)
+
+        assert "BoxState" in repr_str
+        assert "105.00" in repr_str  # high
+        assert "95.00" in repr_str   # low
+        assert "100.00" in repr_str  # mid
+
+    def test_box_mid_property(self):
+        """Test box_mid property calculation."""
+        state = BoxState()
+        state.reset(100.0, 110.0, 90.0)
+
+        assert state.box_mid == 100.0
+
+        # Expand box
+        state.update(120.0, 95.0, 110.0)
+        assert state.box_mid == 105.0  # (120 + 90) / 2
+
+    def test_box_height_property(self):
+        """Test box_height property calculation."""
+        state = BoxState()
+        state.reset(100.0, 110.0, 90.0)
+
+        assert state.box_height == 20.0
+
+        # Expand box
+        state.update(130.0, 85.0, 100.0)
+        assert state.box_height == 45.0  # 130 - 85
+
+    def test_is_valid_property(self):
+        """Test is_valid property."""
+        state = BoxState()
+        assert not state.is_valid
+
+        state.reset(100.0, 105.0, 95.0)
+        assert state.is_valid
