@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 import numpy as np
 
@@ -385,3 +385,247 @@ class BoxState:
             f"mid={self.box_mid:.2f}, touches=({self.high_touch_count},{self.mid_touch_count},{self.low_touch_count}), "
             f"broke=(H:{self.broke_high},L:{self.broke_low}), zone={self.last_zone.value}, bars={self.bar_count})"
         )
+
+
+@dataclass
+class ValidationSignals:
+    """
+    Validation signals for box strategy entries.
+
+    These signals help confirm price rejection at key levels by analyzing
+    candle structure and volume context.
+
+    Attributes:
+        rejection_wick_ratio: Normalized wick asymmetry [-1, 1].
+            Positive = larger lower wick (bullish rejection).
+            Negative = larger upper wick (bearish rejection).
+        volume_vs_session_avg: Current volume relative to session average [0.1, 5.0].
+            > 1.0 indicates above-average activity.
+        approach_bars: Bars since entering current zone.
+            Tracks how long price has been in the current area.
+        zone_entry_bar: Bar index when current zone was entered.
+
+    Usage:
+        signals = ValidationSignals()
+        result = signals.calculate(open, high, low, close, volume, session_avg_vol)
+    """
+
+    rejection_wick_ratio: float = 0.0
+    volume_vs_session_avg: float = 1.0
+    approach_bars: int = 0
+    zone_entry_bar: int = 0
+
+    # Constants for normalization bounds
+    VOLUME_RATIO_MIN: float = field(default=0.1, repr=False, init=False)
+    VOLUME_RATIO_MAX: float = field(default=5.0, repr=False, init=False)
+    EPS: float = field(default=1e-8, repr=False, init=False)
+
+    def calculate_rejection_wick_ratio(
+        self,
+        open_price: float,
+        high: float,
+        low: float,
+        close: float,
+    ) -> float:
+        """
+        Calculate rejection wick ratio from OHLC data.
+
+        Measures wick asymmetry to detect price rejection at levels.
+        - Upper wick = high - max(open, close)
+        - Lower wick = min(open, close) - low
+        - Ratio = (lower_wick - upper_wick) / candle_range
+
+        Returns:
+            Normalized ratio in [-1, 1]:
+            - Positive: Larger lower wick (bullish rejection, wick pointing down)
+            - Negative: Larger upper wick (bearish rejection, wick pointing up)
+            - Zero: Equal wicks (doji-like)
+        """
+        candle_range = high - low
+
+        # Handle zero-range candle (doji at single price)
+        if candle_range < self.EPS:
+            return 0.0
+
+        body_top = max(open_price, close)
+        body_bottom = min(open_price, close)
+
+        upper_wick = high - body_top
+        lower_wick = body_bottom - low
+
+        # Ratio: (lower - upper) / range gives positive for bullish rejection
+        ratio = (lower_wick - upper_wick) / (candle_range + self.EPS)
+
+        # Clip to bounds for numerical stability
+        return float(np.clip(ratio, -1.0, 1.0))
+
+    def calculate_volume_vs_session_avg(
+        self,
+        current_volume: float,
+        session_avg_volume: float,
+    ) -> float:
+        """
+        Calculate current volume relative to session average.
+
+        Args:
+            current_volume: Volume of current bar
+            session_avg_volume: Average volume for the session
+
+        Returns:
+            Volume ratio capped to [VOLUME_RATIO_MIN, VOLUME_RATIO_MAX].
+            Values > 1.0 indicate above-average activity.
+        """
+        # Handle zero/negative volume edge cases
+        if session_avg_volume < self.EPS:
+            return 1.0  # Default to neutral if no session data
+
+        if current_volume < 0:
+            current_volume = 0.0
+
+        ratio = current_volume / (session_avg_volume + self.EPS)
+
+        # Cap to reasonable bounds
+        return float(np.clip(ratio, self.VOLUME_RATIO_MIN, self.VOLUME_RATIO_MAX))
+
+    def calculate_approach_bars(
+        self,
+        current_bar: int,
+        zone_entry_bar: int,
+    ) -> int:
+        """
+        Calculate bars since entering current zone.
+
+        Args:
+            current_bar: Current bar index (BoxState.bar_count)
+            zone_entry_bar: Bar index when zone was entered
+
+        Returns:
+            Number of bars since zone entry (0 if just entered, -1 if invalid)
+        """
+        if zone_entry_bar < 0:
+            return -1  # Zone entry not tracked
+
+        bars_since = current_bar - zone_entry_bar
+        return max(0, bars_since)
+
+    def calculate(
+        self,
+        open_price: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        session_avg_volume: float,
+        current_bar: int = 0,
+        zone_entry_bar: int = 0,
+    ) -> Dict[str, float]:
+        """
+        Calculate all validation signals for current bar.
+
+        Args:
+            open_price: Bar's open price
+            high: Bar's high price
+            low: Bar's low price
+            close: Bar's close price
+            volume: Bar's volume
+            session_avg_volume: Average volume for the session
+            current_bar: Current bar index (for approach_bars tracking)
+            zone_entry_bar: Bar index when current zone was entered
+
+        Returns:
+            Dictionary with all validation signals:
+            - rejection_wick_ratio: [-1, 1]
+            - volume_vs_session_avg: [0.1, 5.0]
+            - approach_bars: >= 0 or -1 if not tracked
+        """
+        self.rejection_wick_ratio = self.calculate_rejection_wick_ratio(
+            open_price, high, low, close
+        )
+        self.volume_vs_session_avg = self.calculate_volume_vs_session_avg(
+            volume, session_avg_volume
+        )
+        self.approach_bars = self.calculate_approach_bars(current_bar, zone_entry_bar)
+        self.zone_entry_bar = zone_entry_bar
+
+        return {
+            "rejection_wick_ratio": self.rejection_wick_ratio,
+            "volume_vs_session_avg": self.volume_vs_session_avg,
+            "approach_bars": self.approach_bars,
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "rejection_wick_ratio": self.rejection_wick_ratio,
+            "volume_vs_session_avg": self.volume_vs_session_avg,
+            "approach_bars": self.approach_bars,
+            "zone_entry_bar": self.zone_entry_bar,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ValidationSignals":
+        """Create ValidationSignals from dictionary."""
+        signals = cls()
+        signals.rejection_wick_ratio = data.get("rejection_wick_ratio", 0.0)
+        signals.volume_vs_session_avg = data.get("volume_vs_session_avg", 1.0)
+        signals.approach_bars = data.get("approach_bars", 0)
+        signals.zone_entry_bar = data.get("zone_entry_bar", 0)
+        return signals
+
+
+def calculate_validation_signals(
+    open_price: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float,
+    session_avg_volume: float,
+    current_bar: int = 0,
+    zone_entry_bar: int = 0,
+) -> Dict[str, float]:
+    """
+    Convenience function to calculate all validation signals.
+
+    This is a module-level function that creates a ValidationSignals instance
+    and computes all signals in one call.
+
+    Args:
+        open_price: Bar's open price
+        high: Bar's high price
+        low: Bar's low price
+        close: Bar's close price
+        volume: Bar's volume
+        session_avg_volume: Average volume for the session
+        current_bar: Current bar index (for approach_bars tracking)
+        zone_entry_bar: Bar index when current zone was entered
+
+    Returns:
+        Dictionary with all validation signals:
+        - rejection_wick_ratio: [-1, 1] (positive = bullish rejection)
+        - volume_vs_session_avg: [0.1, 5.0] (> 1.0 = above average)
+        - approach_bars: >= 0 or -1 if not tracked
+
+    Example:
+        >>> signals = calculate_validation_signals(
+        ...     open_price=100.0, high=105.0, low=95.0, close=102.0,
+        ...     volume=1500.0, session_avg_volume=1000.0,
+        ...     current_bar=50, zone_entry_bar=45
+        ... )
+        >>> signals['rejection_wick_ratio']  # Bullish if positive
+        0.4
+        >>> signals['volume_vs_session_avg']  # 1.5x average volume
+        1.5
+        >>> signals['approach_bars']  # 5 bars in current zone
+        5
+    """
+    validator = ValidationSignals()
+    return validator.calculate(
+        open_price=open_price,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        session_avg_volume=session_avg_volume,
+        current_bar=current_bar,
+        zone_entry_bar=zone_entry_bar,
+    )

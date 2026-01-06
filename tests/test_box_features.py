@@ -10,7 +10,12 @@ import pytest
 from datetime import date
 
 from src.crypto.data_manager import DataManager
-from src.crypto.box_features import BoxState, Zone
+from src.crypto.box_features import (
+    BoxState,
+    Zone,
+    ValidationSignals,
+    calculate_validation_signals,
+)
 
 
 class TestSessionBoundaryDetection:
@@ -701,3 +706,336 @@ class TestBoxState:
 
         state.reset(100.0, 105.0, 95.0)
         assert state.is_valid
+
+
+class TestValidationSignals:
+    """Tests for ValidationSignals dataclass and calculate_validation_signals function."""
+
+    def test_initialization_defaults(self):
+        """Test ValidationSignals initializes with correct defaults."""
+        signals = ValidationSignals()
+
+        assert signals.rejection_wick_ratio == 0.0
+        assert signals.volume_vs_session_avg == 1.0
+        assert signals.approach_bars == 0
+        assert signals.zone_entry_bar == 0
+
+    def test_rejection_wick_ratio_bullish_candle(self):
+        """Test rejection_wick_ratio for bullish candle with large lower wick.
+
+        Bullish candle: open=98, close=102 (bullish body)
+        Range: low=95, high=105 (range=10)
+        Upper wick: 105 - 102 = 3
+        Lower wick: 98 - 95 = 3
+
+        Wait - this gives equal wicks. Let's make a proper bullish rejection:
+        open=100, close=104 (bullish body, body_top=104, body_bottom=100)
+        Range: low=94, high=105 (range=11)
+        Upper wick: 105 - 104 = 1
+        Lower wick: 100 - 94 = 6
+        Ratio: (6 - 1) / 11 = 0.4545... (positive = bullish rejection)
+        """
+        signals = ValidationSignals()
+
+        # Bullish candle with large lower wick (hammer-like)
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=100.0, high=105.0, low=94.0, close=104.0
+        )
+
+        # Expected: (6 - 1) / 11 = 0.4545
+        assert ratio > 0  # Positive indicates bullish rejection
+        assert abs(ratio - 0.4545) < 0.01
+
+    def test_rejection_wick_ratio_bearish_candle(self):
+        """Test rejection_wick_ratio for bearish candle with large upper wick.
+
+        Bearish candle with shooting star pattern:
+        open=104, close=100 (bearish body, body_top=104, body_bottom=100)
+        Range: low=99, high=110 (range=11)
+        Upper wick: 110 - 104 = 6
+        Lower wick: 100 - 99 = 1
+        Ratio: (1 - 6) / 11 = -0.4545... (negative = bearish rejection)
+        """
+        signals = ValidationSignals()
+
+        # Bearish candle with large upper wick (shooting star)
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=104.0, high=110.0, low=99.0, close=100.0
+        )
+
+        # Expected: (1 - 6) / 11 = -0.4545
+        assert ratio < 0  # Negative indicates bearish rejection
+        assert abs(ratio - (-0.4545)) < 0.01
+
+    def test_rejection_wick_ratio_doji(self):
+        """Test rejection_wick_ratio for doji candle with equal wicks.
+
+        Doji: open=close=100
+        Range: low=95, high=105 (range=10)
+        Upper wick: 105 - 100 = 5
+        Lower wick: 100 - 95 = 5
+        Ratio: (5 - 5) / 10 = 0 (neutral)
+        """
+        signals = ValidationSignals()
+
+        # Perfect doji with equal wicks
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=100.0, high=105.0, low=95.0, close=100.0
+        )
+
+        assert abs(ratio) < 0.001  # Should be very close to 0
+
+    def test_rejection_wick_ratio_zero_range(self):
+        """Test rejection_wick_ratio handles zero-range candle (all prices equal)."""
+        signals = ValidationSignals()
+
+        # All prices equal (single tick candle)
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=100.0, high=100.0, low=100.0, close=100.0
+        )
+
+        assert ratio == 0.0  # Should return 0 for degenerate case
+
+    def test_rejection_wick_ratio_bounds(self):
+        """Test rejection_wick_ratio is always bounded to [-1, 1]."""
+        signals = ValidationSignals()
+
+        # Maximum bullish (all lower wick, no upper wick)
+        # open=close=high=100, low=90 => upper=0, lower=10, ratio=1.0
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=100.0, high=100.0, low=90.0, close=100.0
+        )
+        assert ratio <= 1.0
+        assert ratio > 0.9  # Should be close to 1
+
+        # Maximum bearish (all upper wick, no lower wick)
+        # open=close=low=100, high=110 => upper=10, lower=0, ratio=-1.0
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=100.0, high=110.0, low=100.0, close=100.0
+        )
+        assert ratio >= -1.0
+        assert ratio < -0.9  # Should be close to -1
+
+    def test_volume_vs_session_avg_normal(self):
+        """Test volume_vs_session_avg with normal volume levels."""
+        signals = ValidationSignals()
+
+        # Volume at session average
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=1000.0, session_avg_volume=1000.0
+        )
+        assert abs(ratio - 1.0) < 0.001
+
+        # Volume 50% above average
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=1500.0, session_avg_volume=1000.0
+        )
+        assert abs(ratio - 1.5) < 0.001
+
+        # Volume 50% below average
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=500.0, session_avg_volume=1000.0
+        )
+        assert abs(ratio - 0.5) < 0.001
+
+    def test_volume_vs_session_avg_capping(self):
+        """Test volume_vs_session_avg is capped to [0.1, 5.0]."""
+        signals = ValidationSignals()
+
+        # Very high volume (should cap at 5.0)
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=10000.0, session_avg_volume=1000.0
+        )
+        assert ratio == 5.0
+
+        # Very low volume (should cap at 0.1)
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=50.0, session_avg_volume=1000.0
+        )
+        assert ratio == 0.1
+
+        # Zero volume (should cap at 0.1)
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=0.0, session_avg_volume=1000.0
+        )
+        assert ratio == 0.1
+
+    def test_volume_vs_session_avg_zero_session_avg(self):
+        """Test volume_vs_session_avg handles zero session average."""
+        signals = ValidationSignals()
+
+        # Zero session average should return neutral 1.0
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=1000.0, session_avg_volume=0.0
+        )
+        assert ratio == 1.0
+
+    def test_volume_vs_session_avg_negative_volume(self):
+        """Test volume_vs_session_avg handles negative current volume."""
+        signals = ValidationSignals()
+
+        # Negative volume should be treated as 0
+        ratio = signals.calculate_volume_vs_session_avg(
+            current_volume=-100.0, session_avg_volume=1000.0
+        )
+        assert ratio == 0.1  # 0 / 1000 capped to 0.1
+
+    def test_approach_bars_tracking(self):
+        """Test approach_bars calculation."""
+        signals = ValidationSignals()
+
+        # Just entered zone
+        bars = signals.calculate_approach_bars(current_bar=50, zone_entry_bar=50)
+        assert bars == 0
+
+        # In zone for 5 bars
+        bars = signals.calculate_approach_bars(current_bar=55, zone_entry_bar=50)
+        assert bars == 5
+
+        # In zone for 100 bars
+        bars = signals.calculate_approach_bars(current_bar=150, zone_entry_bar=50)
+        assert bars == 100
+
+    def test_approach_bars_invalid_zone_entry(self):
+        """Test approach_bars with invalid zone entry (negative)."""
+        signals = ValidationSignals()
+
+        # Zone entry not tracked (negative value)
+        bars = signals.calculate_approach_bars(current_bar=50, zone_entry_bar=-1)
+        assert bars == -1
+
+    def test_approach_bars_entry_after_current(self):
+        """Test approach_bars handles zone_entry_bar > current_bar."""
+        signals = ValidationSignals()
+
+        # This shouldn't happen, but should return 0 (not negative)
+        bars = signals.calculate_approach_bars(current_bar=50, zone_entry_bar=60)
+        assert bars == 0  # max(0, -10) = 0
+
+    def test_calculate_all_signals(self):
+        """Test calculate() method returns all signals."""
+        signals = ValidationSignals()
+
+        result = signals.calculate(
+            open_price=100.0,
+            high=105.0,
+            low=94.0,
+            close=104.0,
+            volume=1500.0,
+            session_avg_volume=1000.0,
+            current_bar=50,
+            zone_entry_bar=45,
+        )
+
+        # Check all keys present
+        assert "rejection_wick_ratio" in result
+        assert "volume_vs_session_avg" in result
+        assert "approach_bars" in result
+
+        # Check values are reasonable
+        assert result["rejection_wick_ratio"] > 0  # Bullish candle
+        assert abs(result["volume_vs_session_avg"] - 1.5) < 0.001
+        assert result["approach_bars"] == 5
+
+        # Check instance variables are also set
+        assert signals.rejection_wick_ratio == result["rejection_wick_ratio"]
+        assert signals.volume_vs_session_avg == result["volume_vs_session_avg"]
+        assert signals.approach_bars == result["approach_bars"]
+        assert signals.zone_entry_bar == 45
+
+    def test_calculate_validation_signals_function(self):
+        """Test module-level calculate_validation_signals function."""
+        result = calculate_validation_signals(
+            open_price=100.0,
+            high=105.0,
+            low=94.0,
+            close=104.0,
+            volume=1500.0,
+            session_avg_volume=1000.0,
+            current_bar=50,
+            zone_entry_bar=45,
+        )
+
+        # Check all keys present
+        assert "rejection_wick_ratio" in result
+        assert "volume_vs_session_avg" in result
+        assert "approach_bars" in result
+
+        # Check values match ValidationSignals.calculate()
+        signals = ValidationSignals()
+        expected = signals.calculate(
+            open_price=100.0,
+            high=105.0,
+            low=94.0,
+            close=104.0,
+            volume=1500.0,
+            session_avg_volume=1000.0,
+            current_bar=50,
+            zone_entry_bar=45,
+        )
+
+        assert result == expected
+
+    def test_to_dict_and_from_dict(self):
+        """Test serialization round-trip."""
+        signals = ValidationSignals()
+        signals.calculate(
+            open_price=100.0,
+            high=110.0,
+            low=95.0,
+            close=108.0,
+            volume=2000.0,
+            session_avg_volume=1000.0,
+            current_bar=75,
+            zone_entry_bar=60,
+        )
+
+        # Serialize
+        data = signals.to_dict()
+
+        # Deserialize
+        restored = ValidationSignals.from_dict(data)
+
+        assert restored.rejection_wick_ratio == signals.rejection_wick_ratio
+        assert restored.volume_vs_session_avg == signals.volume_vs_session_avg
+        assert restored.approach_bars == signals.approach_bars
+        assert restored.zone_entry_bar == signals.zone_entry_bar
+
+    def test_from_dict_with_missing_keys(self):
+        """Test from_dict handles missing keys with defaults."""
+        data = {"rejection_wick_ratio": 0.5}  # Missing other keys
+
+        signals = ValidationSignals.from_dict(data)
+
+        assert signals.rejection_wick_ratio == 0.5
+        assert signals.volume_vs_session_avg == 1.0  # Default
+        assert signals.approach_bars == 0  # Default
+        assert signals.zone_entry_bar == 0  # Default
+
+    def test_numerical_stability_small_values(self):
+        """Test numerical stability with very small price values."""
+        signals = ValidationSignals()
+
+        # Very small prices (like some penny stocks or small cap crypto)
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=0.0001, high=0.00015, low=0.00005, close=0.00012
+        )
+
+        # Should still produce valid bounded result
+        assert -1.0 <= ratio <= 1.0
+        assert not np.isnan(ratio)
+        assert not np.isinf(ratio)
+
+    def test_numerical_stability_large_values(self):
+        """Test numerical stability with very large price values."""
+        signals = ValidationSignals()
+
+        # Very large prices (like BTC)
+        ratio = signals.calculate_rejection_wick_ratio(
+            open_price=50000.0, high=51000.0, low=49000.0, close=50500.0
+        )
+
+        # Should still produce valid bounded result
+        assert -1.0 <= ratio <= 1.0
+        assert not np.isnan(ratio)
+        assert not np.isinf(ratio)

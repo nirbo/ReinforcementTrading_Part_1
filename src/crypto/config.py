@@ -325,6 +325,46 @@ class TrainingConfig(BaseModel):
     seed: int = 42
 
 
+class BoxFeatureConfig(BaseModel):
+    """
+    Configuration for intraday box strategy features.
+
+    The box strategy identifies session high/low ranges and trades breakouts
+    or bounces from these dynamic support/resistance levels.
+
+    Attributes:
+        use_box_features: Enable box features in the observation space.
+            When False (default), box features are not computed, maintaining
+            backward compatibility with existing configs.
+        box_warmup_bars: Number of bars required before box features are valid.
+            The box needs sufficient price history to establish meaningful
+            high/low levels. Minimum 1, maximum 500.
+        box_touch_tolerance_pct: Tolerance for detecting price "at level" as a
+            percentage of price. E.g., 0.001 = 0.1% tolerance means price within
+            0.1% of box high/low is considered "touching" the level.
+    """
+
+    use_box_features: bool = False
+    box_warmup_bars: int = 30
+    box_touch_tolerance_pct: float = 0.001
+
+    @field_validator("box_warmup_bars")
+    @classmethod
+    def validate_warmup_bars(cls, v: int) -> int:
+        if not 1 <= v <= 500:
+            raise ValueError(f"box_warmup_bars must be between 1 and 500, got {v}")
+        return v
+
+    @field_validator("box_touch_tolerance_pct")
+    @classmethod
+    def validate_touch_tolerance(cls, v: float) -> float:
+        if not 0 < v <= 0.05:
+            raise ValueError(
+                f"box_touch_tolerance_pct must be > 0 and <= 0.05 (5%), got {v}"
+            )
+        return v
+
+
 class DataConfig(BaseModel):
     """Data storage configuration."""
 
@@ -367,6 +407,7 @@ class CryptoConfig(BaseModel):
     indicators: IndicatorConfig = Field(default_factory=IndicatorConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     data: DataConfig = Field(default_factory=DataConfig)
+    box_features: BoxFeatureConfig = Field(default_factory=BoxFeatureConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "CryptoConfig":
