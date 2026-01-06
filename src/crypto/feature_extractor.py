@@ -176,12 +176,15 @@ class FeatureExtractor:
         self.include_htf = include_htf
         self.indicator_config = self.config.indicators.model_dump()
 
-        # Compute base feature dimension
-        self._base_features = self._get_feature_names()
+        # Feature toggle flags from config
+        self.use_base_features = self.config.box_features.use_base_features
+        self.use_box_features = self.config.box_features.use_box_features
+
+        # Compute base feature dimension (only if enabled)
+        self._base_features = self._get_feature_names() if self.use_base_features else []
         self._base_feature_dim = len(self._base_features)
 
         # Box features integration (optional, controlled by config)
-        self.use_box_features = self.config.box_features.use_box_features
         self._box_extractor: Optional[BoxFeatureExtractor] = None
 
         if self.use_box_features:
@@ -316,11 +319,15 @@ class FeatureExtractor:
         Returns:
             DataFrame with feature columns
         """
+        features = pd.DataFrame(index=df.index)
+
+        # If base features disabled, return empty DataFrame (box-only mode)
+        if not self.use_base_features:
+            return features
+
         # Compute indicators if not already present
         if "rsi" not in df.columns:
             df = compute_all_indicators(df, self.indicator_config)
-
-        features = pd.DataFrame(index=df.index)
 
         close = df["close"]
         high = df["high"]

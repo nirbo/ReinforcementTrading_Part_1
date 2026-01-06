@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import ClassVar, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ExchangeConfig(BaseModel):
@@ -333,6 +333,9 @@ class BoxFeatureConfig(BaseModel):
     or bounces from these dynamic support/resistance levels.
 
     Attributes:
+        use_base_features: Enable the 76 base indicator features (HMA, Kalman,
+            RSI, MACD, pivot/SR, etc.). When False, only box features are used,
+            creating a standalone box-only strategy.
         use_box_features: Enable box features in the observation space.
             When False (default), box features are not computed, maintaining
             backward compatibility with existing configs.
@@ -342,9 +345,16 @@ class BoxFeatureConfig(BaseModel):
         box_touch_tolerance_pct: Tolerance for detecting price "at level" as a
             percentage of price. E.g., 0.001 = 0.1% tolerance means price within
             0.1% of box high/low is considered "touching" the level.
+
+    Feature Combinations:
+        - use_base_features=True, use_box_features=False: Original 76 features (default)
+        - use_base_features=True, use_box_features=True: Combined 96 features
+        - use_base_features=False, use_box_features=True: Box-only 20 features
+        - use_base_features=False, use_box_features=False: Invalid (no features)
     """
 
-    use_box_features: bool = False
+    use_base_features: bool = True  # Enable 76 base indicator features
+    use_box_features: bool = False  # Enable 20 box features
     box_warmup_bars: int = 30
     box_touch_tolerance_pct: float = 0.001
 
@@ -363,6 +373,16 @@ class BoxFeatureConfig(BaseModel):
                 f"box_touch_tolerance_pct must be > 0 and <= 0.05 (5%), got {v}"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_at_least_one_feature_set(self) -> "BoxFeatureConfig":
+        """Ensure at least one feature set is enabled."""
+        if not self.use_base_features and not self.use_box_features:
+            raise ValueError(
+                "At least one feature set must be enabled: "
+                "use_base_features=True and/or use_box_features=True"
+            )
+        return self
 
 
 class DataConfig(BaseModel):

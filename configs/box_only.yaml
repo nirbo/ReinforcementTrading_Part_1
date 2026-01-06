@@ -1,0 +1,126 @@
+# Box-Only Strategy Training Configuration
+# =========================================
+#
+# This config enables ONLY the Intraday Dynamic Box Strategy features,
+# disabling all 76 base indicator features (HMA, Kalman, RSI, MACD, etc.)
+#
+# Key differences from default.yaml:
+#   - box_features.use_base_features: false (disables 76 base features)
+#   - box_features.use_box_features: true (enables 20 box features)
+#   - Observation space: 23 features (20 box + 3 position)
+#
+# Use this config to train a pure box strategy model.
+# This is a standalone strategy based solely on intraday session levels.
+
+exchange:
+  name: bybit
+  testnet: false
+  api_key: null
+  api_secret: null
+  rate_limit_per_second: 10.0
+
+pairs:
+  pairs:
+  - SUI/USDT:USDT
+  - SOL/USDT:USDT
+  - LINK/USDT:USDT
+  - BNB/USDT:USDT
+  default_pair: SOL/USDT:USDT
+
+timeframes:
+  ltf: 5m
+  htf: 9m
+
+fees:
+  use_dynamic_fees: true
+  default_taker_fee: 0.00055
+  default_maker_fee: 0.0002
+  fee_cache_ttl_seconds: 3600
+
+risk:
+  max_position_pct: 0.25
+  max_leverage: 3
+  apply_leverage: true
+  daily_loss_limit_pct: 0.05
+  max_concurrent_positions: 1
+  cooldown_bars: 3
+  max_trades_per_day: 50
+  default_sl_pct: 0.03
+  default_tp_pct: 0.06
+  tight_sl_pct: 0.01
+  tight_tp_pct: 0.015
+  min_sl_pct: 0.005
+  max_sl_pct: 0.05
+  min_tp_pct: 0.01
+  max_tp_pct: 0.1
+  base_slippage_pct: 0.0001
+  size_slippage_factor: 0.0
+
+indicators:
+  pivot_left_bars: 4
+  pivot_right_bars: 3
+  use_high_low: true
+  trend_method: HMA
+  trend_length: 14
+  kalman_short_len: 18
+  kalman_long_len: 23
+  breakout_lookback: 40
+  breakout_vol_multiplier: 1.1
+  velocity_threshold: 3.5
+  velocity_bars: 3
+  atr_length: 14
+  rsi_length: 14
+  mfi_length: 14
+  rsi_oversold: 30.0
+  rsi_overbought: 70.0
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_length: 20
+  bb_mult: 2.0
+
+# Box-Only Configuration
+# ======================
+# Disables base features, enables only box features.
+# Observation space: 20 box features + 3 position features = 23 total
+box_features:
+  use_base_features: false  # DISABLE 76 base indicator features
+  use_box_features: true    # ENABLE 20 box features
+  box_warmup_bars: 30
+  box_touch_tolerance_pct: 0.001
+
+training:
+  # Smaller state space (23 features) may need less training
+  total_timesteps: 10000000  # 10M steps
+  learning_rate: 0.0001
+  n_steps: 2048
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.02
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  # Smaller network for smaller state space
+  net_arch:
+  - 128
+  - 128
+  n_envs: 32
+  use_gpu: true
+  torch_compile: "reduce-overhead"
+  window_size: 30
+  episode_max_steps: 2000
+  checkpoint_freq: 50000
+  eval_freq: 10000
+  seed: 42
+
+data:
+  data_dir: data
+  raw_dir: data/raw
+  processed_dir: data/processed
+  eval_holdout_pct: 0.2
+  eval_holdout_seed: 12345
+  use_temporal_split: false
+  compression: snappy
+  min_bars: 10000
