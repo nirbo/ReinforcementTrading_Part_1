@@ -1358,3 +1358,298 @@ class TestBoxFeatureExtractor:
 
         # Should show time in zone
         assert features["approach_bars_norm"] > 0.0
+
+
+class TestEnvironmentIntegration:
+    """Integration tests for CryptoTradingEnv with box features."""
+
+    @pytest.fixture
+    def multi_day_df(self):
+        """Create test DataFrame spanning multiple trading sessions."""
+        np.random.seed(42)
+        n_days = 3
+        bars_per_day = 288  # 5m bars per day
+        n = n_days * bars_per_day
+
+        returns = np.random.randn(n) * 0.02
+        close = pd.Series(100 * np.exp(np.cumsum(returns)))
+        high = close * (1 + np.abs(np.random.randn(n) * 0.01))
+        low = close * (1 - np.abs(np.random.randn(n) * 0.01))
+
+        timestamps = pd.date_range(
+            start="2024-01-15 00:00:00",
+            periods=n,
+            freq="5min",
+            tz="UTC",
+        )
+
+        df = pd.DataFrame(
+            {
+                "open": close.values,
+                "high": high.values,
+                "low": low.values,
+                "close": close.values,
+                "volume": np.random.uniform(1000, 10000, n),
+            },
+            index=timestamps,
+        )
+        return DataManager.add_session_boundaries(df)
+
+    @pytest.fixture
+    def config_with_box(self):
+        """Create config with box features enabled."""
+        from src.crypto.config import CryptoConfig
+        config = CryptoConfig()
+        config.box_features.use_box_features = True
+        return config
+
+    @pytest.fixture
+    def config_without_box(self):
+        """Create config with box features disabled."""
+        from src.crypto.config import CryptoConfig
+        config = CryptoConfig()
+        config.box_features.use_box_features = False
+        return config
+
+    def test_gymnasium_check_env_with_box_features(self, multi_day_df, config_with_box):
+        """Test that gymnasium check_env() passes with box features enabled."""
+        from gymnasium.utils.env_checker import check_env
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+            max_episode_bars=100,
+        )
+
+        # Should not raise
+        check_env(env, skip_render_check=True)
+
+    def test_gymnasium_check_env_without_box_features(self, multi_day_df, config_without_box):
+        """Test that gymnasium check_env() passes without box features."""
+        from gymnasium.utils.env_checker import check_env
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_without_box,
+            window_size=30,
+            random_start=False,
+            max_episode_bars=100,
+        )
+
+        check_env(env, skip_render_check=True)
+
+    def test_observation_space_shape_with_box(self, multi_day_df, config_with_box):
+        """Test observation space has correct shape with box features."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+        )
+
+        # 76 base features + 20 box features + 3 position state = 99
+        expected_shape = (30, 99)
+        assert env.observation_space.shape == expected_shape
+        assert env._box_feature_dim == 20
+
+    def test_observation_space_shape_without_box(self, multi_day_df, config_without_box):
+        """Test observation space has correct shape without box features."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_without_box,
+            window_size=30,
+            random_start=False,
+        )
+
+        # 76 base features + 3 position state = 79
+        expected_shape = (30, 79)
+        assert env.observation_space.shape == expected_shape
+        assert env._box_feature_dim == 0
+
+    def test_episode_rollout_with_box_features(self, multi_day_df, config_with_box):
+        """Test complete episode rollout with box features."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+            max_episode_bars=500,
+        )
+
+        obs, info = env.reset()
+
+        # Verify initial observation shape
+        assert obs.shape == env.observation_space.shape
+
+        # Run episode
+        total_reward = 0
+        step_count = 0
+        for _ in range(500):
+            action = env.action_space.sample()
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            # Verify observation is valid
+            assert obs.shape == env.observation_space.shape
+            assert np.isfinite(obs).all(), "Observation contains NaN or Inf"
+            assert np.isfinite(reward), "Reward is NaN or Inf"
+
+            total_reward += reward
+            step_count += 1
+
+            if terminated or truncated:
+                break
+
+        # Should have run for multiple steps
+        assert step_count > 0
+
+    def test_session_boundary_reset_with_box_features(self, multi_day_df, config_with_box):
+        """Test that box state resets at session boundaries."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+            max_episode_bars=700,  # More than 2 days
+        )
+
+        obs, _ = env.reset()
+
+        # Track session transitions
+        initial_session = env._current_session_id
+
+        # Run until at least one session boundary
+        prev_session = initial_session
+        bar_counts_at_transition = []
+
+        for _ in range(600):  # Should cross 2 session boundaries
+            env.step(0)  # HOLD
+
+            if env._current_session_id != prev_session:
+                # Box should have been reset (bar_count should be 1)
+                box = env.feature_extractor._box_extractor.box_state
+                bar_counts_at_transition.append(box.bar_count)
+                prev_session = env._current_session_id
+
+        # Should have seen at least one session transition
+        assert len(bar_counts_at_transition) >= 1, "No session transitions occurred"
+
+        # After transition, bar_count should be low (just a few bars since reset)
+        # Due to step timing, bar_count is 1 right after reset, then increments
+        for bc in bar_counts_at_transition:
+            assert bc <= 5, f"Bar count {bc} too high after session reset"
+
+    def test_session_transitions_tracked(self, multi_day_df, config_with_box):
+        """Test that session transitions are tracked in info dict."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+            max_episode_bars=600,
+        )
+
+        env.reset()
+
+        # Run episode
+        info = {}
+        for _ in range(580):
+            _, _, terminated, truncated, info = env.step(0)
+            if terminated or truncated:
+                break
+
+        # Should have session_transitions in info
+        assert "session_transitions" in info
+        assert info["session_transitions"] >= 1
+
+    def test_multiple_episodes_stability(self, multi_day_df, config_with_box):
+        """Test multiple episode resets for stability."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=True,
+            max_episode_bars=100,
+        )
+
+        # Run multiple episodes
+        for episode in range(5):
+            obs, info = env.reset()
+
+            # Verify initial state
+            assert obs.shape == env.observation_space.shape
+            assert np.isfinite(obs).all()
+
+            # Run partial episode
+            for _ in range(50):
+                action = env.action_space.sample()
+                obs, reward, terminated, truncated, info = env.step(action)
+
+                assert np.isfinite(obs).all()
+                assert np.isfinite(reward)
+
+                if terminated or truncated:
+                    break
+
+    def test_box_state_valid_after_reset(self, multi_day_df, config_with_box):
+        """Test that box state is valid after environment reset."""
+        from src.crypto.trading_env import CryptoTradingEnv
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+        )
+
+        env.reset()
+
+        # Box state should be valid
+        box = env.feature_extractor._box_extractor.box_state
+        assert box.is_valid, "Box state not valid after reset"
+        assert box.session_high > 0, "session_high should be positive"
+        assert box.session_low > 0, "session_low should be positive"
+        assert box.session_low < box.session_high, "session_low should be < session_high"
+
+    def test_box_features_in_observation(self, multi_day_df, config_with_box):
+        """Test that box features are present and valid in observations."""
+        from src.crypto.trading_env import CryptoTradingEnv
+        from src.crypto.box_features import BOX_FEATURE_NAMES
+
+        env = CryptoTradingEnv(
+            multi_day_df,
+            config=config_with_box,
+            window_size=30,
+            random_start=False,
+        )
+
+        obs, _ = env.reset()
+
+        # Box features should be in columns 76-95 (0-indexed)
+        # (76 base features, then 20 box features, then 3 position features)
+        box_features = obs[0, 76:96]  # First row, box feature columns
+
+        # Should have 20 box features
+        assert len(box_features) == 20
+
+        # All should be finite
+        assert np.isfinite(box_features).all(), "Box features contain NaN or Inf"
+
+        # Check normalization - most features should be in reasonable bounds
+        assert np.all(box_features >= -2), "Box features below -2"
+        assert np.all(box_features <= 2), "Box features above 2"

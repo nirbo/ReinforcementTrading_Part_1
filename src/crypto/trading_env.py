@@ -113,11 +113,16 @@ class CryptoTradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
 
         # Observation space: (window_size, feature_dim)
-        feature_dim = self._precomputed_features.shape[1]
+        # Use feature_extractor.feature_dim which includes box features if enabled
+        # - Without box features: 76 base + 3 position = 79
+        # - With box features: 76 base + 20 box + 3 position = 99
+        self._base_feature_dim = self._precomputed_features.shape[1]
+        self._box_feature_dim = self.feature_extractor._box_feature_dim
+        total_feature_dim = self._base_feature_dim + self._box_feature_dim + 3  # +3 for position state
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(window_size, feature_dim + 3),  # +3 for position state
+            shape=(window_size, total_feature_dim),
             dtype=np.float32,
         )
 
@@ -159,6 +164,74 @@ class CryptoTradingEnv(gym.Env):
 
         # Entry filter tracking
         self.blocked_entries = 0
+
+        # Session tracking for box features
+        self._current_session_id: Optional[int] = None
+        self._session_transitions: int = 0  # Count of session boundaries crossed
+
+    @property
+    def _has_session_info(self) -> bool:
+        """Check if DataFrame has session_id column for session boundary detection."""
+        return "session_id" in self.df.columns
+
+    def _get_session_id(self, bar: int) -> Optional[int]:
+        """Get session ID at bar, or None if session info not available."""
+        if not self._has_session_info:
+            return None
+        return int(self.df.iloc[bar]["session_id"])
+
+    def _find_session_start_bar(self, bar: int) -> int:
+        """
+        Find the first bar of the session containing the given bar.
+
+        If session_id column is available, finds the first bar with the same session_id.
+        Otherwise, returns the given bar (treat it as session start).
+        """
+        if not self._has_session_info:
+            return bar
+
+        session_id = self._get_session_id(bar)
+
+        # Search backwards to find first bar of this session
+        start_bar = bar
+        while start_bar > 0:
+            prev_session_id = self._get_session_id(start_bar - 1)
+            if prev_session_id != session_id:
+                break
+            start_bar -= 1
+
+        return start_bar
+
+    def _initialize_box_for_session(self, session_start_bar: int) -> None:
+        """
+        Initialize box state with the first bar of a session.
+
+        Args:
+            session_start_bar: The index of the first bar in the session
+        """
+        if self._box_feature_dim == 0:
+            return
+
+        row = self.df.iloc[session_start_bar]
+        self.feature_extractor.reset_box_session(
+            first_open=float(row["open"]),
+            first_high=float(row["high"]),
+            first_low=float(row["low"]),
+            first_volume=float(row.get("volume", 0)),
+        )
+
+        # Update session tracking
+        self._current_session_id = self._get_session_id(session_start_bar)
+
+        # Update box state for all bars from session start up to (but not including) current bar
+        for bar_idx in range(session_start_bar + 1, self.current_bar + 1):
+            bar_row = self.df.iloc[bar_idx]
+            self.feature_extractor.update_box_state(
+                high=float(bar_row["high"]),
+                low=float(bar_row["low"]),
+                close=float(bar_row["close"]),
+                volume=float(bar_row.get("volume", 0)),
+            )
 
     def _get_price(self, bar: Optional[int] = None) -> float:
         """Get close price at bar."""
@@ -234,17 +307,34 @@ class CryptoTradingEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         """Get current observation."""
-        # Get feature window
+        # Get base feature window
         start_idx = max(0, self.current_bar - self.window_size + 1)
         end_idx = self.current_bar + 1
 
-        features = self._precomputed_features[start_idx:end_idx]
+        base_features = self._precomputed_features[start_idx:end_idx]
 
         # Pad if necessary
-        if len(features) < self.window_size:
-            pad_size = self.window_size - len(features)
-            padding = np.tile(features[0], (pad_size, 1))
-            features = np.vstack([padding, features])
+        if len(base_features) < self.window_size:
+            pad_size = self.window_size - len(base_features)
+            padding = np.tile(base_features[0], (pad_size, 1))
+            base_features = np.vstack([padding, base_features])
+
+        # Add box features if enabled
+        if self._box_feature_dim > 0:
+            # Get current bar data for box feature extraction
+            row = self.df.iloc[self.current_bar]
+            box_features = self.feature_extractor.get_box_features(
+                open_price=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row.get("volume", 0)),
+                atr=float(row.get("atr", row["close"] * 0.02)),  # Default 2% ATR
+            )
+            # Tile box features across window (same for all rows since it's current state)
+            box_block = np.tile(box_features, (self.window_size, 1))
+        else:
+            box_block = np.zeros((self.window_size, 0), dtype=np.float32)
 
         # Add position state to each row
         unrealized = self._compute_unrealized_pnl()
@@ -256,7 +346,9 @@ class CryptoTradingEnv(gym.Env):
 
         # Tile position features across window
         position_block = np.tile(position_features, (self.window_size, 1))
-        obs = np.hstack([features, position_block]).astype(np.float32)
+
+        # Concatenate: base_features + box_features + position_features
+        obs = np.hstack([base_features, box_block, position_block]).astype(np.float32)
 
         return obs
 
@@ -426,6 +518,12 @@ class CryptoTradingEnv(gym.Env):
         else:
             self.current_bar = self.window_size
 
+        # Initialize box state if enabled
+        # Find the session start for the current bar and initialize box with full session history
+        if self._box_feature_dim > 0:
+            session_start = self._find_session_start_bar(self.current_bar)
+            self._initialize_box_for_session(session_start)
+
         obs = self._get_observation()
         info = {"equity": self.equity, "position": self.position.direction}
 
@@ -475,6 +573,32 @@ class CryptoTradingEnv(gym.Env):
         # Advance time
         self.current_bar += 1
 
+        # Update box state if enabled
+        if self._box_feature_dim > 0:
+            row = self.df.iloc[self.current_bar]
+
+            # Check for session boundary (new trading day)
+            new_session_id = self._get_session_id(self.current_bar)
+            if new_session_id is not None and new_session_id != self._current_session_id:
+                # Session boundary crossed - reset box state with new session's first bar
+                # Note: Episode continues (no episode reset), only box state resets
+                self.feature_extractor.reset_box_session(
+                    first_open=float(row["open"]),
+                    first_high=float(row["high"]),
+                    first_low=float(row["low"]),
+                    first_volume=float(row.get("volume", 0)),
+                )
+                self._current_session_id = new_session_id
+                self._session_transitions += 1
+            else:
+                # Same session - update box state with new bar
+                self.feature_extractor.update_box_state(
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row.get("volume", 0)),
+                )
+
         # Track equity
         current_unrealized = self._compute_unrealized_pnl()
         self.equity_curve.append(self.equity * (1 + current_unrealized))
@@ -501,6 +625,7 @@ class CryptoTradingEnv(gym.Env):
             "unrealized_pnl": self._compute_unrealized_pnl(),
             "n_trades": len(self.trades),
             "bars_in_episode": self.bars_in_episode,
+            "session_transitions": self._session_transitions,  # Session boundaries crossed
         }
 
         if self.trades:
