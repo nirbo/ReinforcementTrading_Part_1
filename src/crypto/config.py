@@ -345,6 +345,11 @@ class DataConfig(BaseModel):
     # Historical data
     min_bars: int = 10000  # Minimum bars required for training
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SESSION BOUNDARIES - For intraday box strategy features
+    # ═══════════════════════════════════════════════════════════════════════════
+    session_timezone: str = "UTC"       # Timezone for session boundary detection
+
     def model_post_init(self, __context) -> None:
         # Create directories if they don't exist
         for dir_path in [self.data_dir, self.raw_dir, self.processed_dir]:

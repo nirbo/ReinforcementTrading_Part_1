@@ -52,6 +52,80 @@ class DataManager:
         self._exchange: Optional[ccxt.Exchange] = None
         self._fee_cache: Dict[str, Tuple[float, datetime]] = {}
 
+    @staticmethod
+    def add_session_boundaries(
+        df: pd.DataFrame,
+        timezone_str: str = "UTC",
+    ) -> pd.DataFrame:
+        """
+        Add session boundary columns to OHLCV DataFrame.
+
+        Detects trading session boundaries based on calendar day changes.
+        Used for intraday box strategy features.
+
+        Adds columns:
+        - session_id: int, incrementing integer per trading session (0-indexed)
+        - session_start: bool, True for first bar of each session
+        - session_date: date, the date of the session in specified timezone
+
+        Args:
+            df: OHLCV DataFrame with datetime index (must be sorted ascending)
+            timezone_str: Timezone for session boundaries (default 'UTC')
+
+        Returns:
+            DataFrame with session columns added (original columns preserved)
+
+        Raises:
+            ValueError: If DataFrame is empty or index is not datetime
+
+        Note:
+            - Data gaps spanning multiple days increment session_id by 1 (not by gap size)
+            - First bar is always session_start=True
+            - Duplicate timestamps are treated as same session
+        """
+        if df.empty:
+            raise ValueError("Cannot add session boundaries to empty DataFrame")
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise ValueError("DataFrame index must be DatetimeIndex")
+
+        # Make a copy to avoid modifying original
+        result = df.copy()
+
+        # Ensure index is sorted (critical for session detection)
+        if not result.index.is_monotonic_increasing:
+            result = result.sort_index()
+
+        # Convert to target timezone if needed
+        idx = result.index
+        if idx.tz is None:
+            # Assume UTC for timezone-naive timestamps
+            idx = idx.tz_localize("UTC")
+
+        if timezone_str != "UTC":
+            idx = idx.tz_convert(timezone_str)
+
+        # Extract dates for session boundary detection
+        dates = idx.date
+
+        # Detect session changes (where date differs from previous)
+        # First element: use shift which creates NaT, compared to date gives True
+        dates_series = pd.Series(dates, index=result.index)
+        session_changes = dates_series != dates_series.shift(1)
+
+        # First bar is always a session start
+        session_changes.iloc[0] = True
+
+        # Session ID: cumulative sum of changes, minus 1 for 0-indexing
+        session_id = session_changes.cumsum() - 1
+
+        # Add columns
+        result["session_id"] = session_id.astype(np.int32)
+        result["session_start"] = session_changes
+        result["session_date"] = dates_series
+
+        return result
+
     @property
     def exchange(self) -> ccxt.Exchange:
         """Lazy-load exchange connection."""
@@ -223,6 +297,7 @@ class DataManager:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
         auto_aggregate: bool = True,
+        add_session_info: bool = False,
     ) -> pd.DataFrame:
         """
         Load OHLCV data from parquet.
@@ -236,13 +311,16 @@ class DataManager:
             start: Optional start filter
             end: Optional end filter
             auto_aggregate: If True, aggregate from 1m for non-native timeframes
+            add_session_info: If True, add session boundary columns (session_id,
+                              session_start, session_date) for intraday box features
 
         Returns:
-            DataFrame with OHLCV data
+            DataFrame with OHLCV data (and optionally session columns)
         """
         from src.crypto.config import TimeframeConfig
 
         path = self._get_parquet_path(symbol, timeframe)
+        df = pd.DataFrame()
 
         # Try loading existing data first
         if path.exists():
@@ -253,10 +331,9 @@ class DataManager:
                     df = df[df.index >= start]
                 if end is not None:
                     df = df[df.index <= end]
-                return df
 
         # No existing data - try aggregation for non-native timeframes
-        if auto_aggregate and not TimeframeConfig.is_native(timeframe):
+        if df.empty and auto_aggregate and not TimeframeConfig.is_native(timeframe):
             # Import here to avoid circular imports
             from src.crypto.aggregation import ensure_timeframe
 
@@ -269,10 +346,17 @@ class DataManager:
                     df = df[df.index >= start]
                 if end is not None:
                     df = df[df.index <= end]
-                return df
 
-        logger.warning(f"No data found for {symbol} {timeframe}")
-        return pd.DataFrame()
+        if df.empty:
+            logger.warning(f"No data found for {symbol} {timeframe}")
+            return pd.DataFrame()
+
+        # Add session boundary info if requested
+        if add_session_info:
+            timezone_str = self.config.data.session_timezone
+            df = self.add_session_boundaries(df, timezone_str)
+
+        return df
 
     def get_bar_count(self, symbol: str, timeframe: str) -> int:
         """Get number of stored bars for symbol/timeframe."""
