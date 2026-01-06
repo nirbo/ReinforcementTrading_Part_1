@@ -15,6 +15,8 @@ from src.crypto.box_features import (
     Zone,
     ValidationSignals,
     calculate_validation_signals,
+    BoxFeatureExtractor,
+    BOX_FEATURE_NAMES,
 )
 
 
@@ -1039,3 +1041,320 @@ class TestValidationSignals:
         assert -1.0 <= ratio <= 1.0
         assert not np.isnan(ratio)
         assert not np.isinf(ratio)
+
+
+class TestBoxFeatureExtractor:
+    """Tests for BoxFeatureExtractor class."""
+
+    def test_initialization(self):
+        """Test BoxFeatureExtractor initializes correctly."""
+        extractor = BoxFeatureExtractor(warmup_bars=30)
+
+        assert extractor.warmup_bars == 30
+        assert extractor.feature_dim == len(BOX_FEATURE_NAMES)
+        assert extractor.feature_dim == 20  # 20 features
+        assert not extractor.is_warm
+        assert extractor.session_avg_volume == 0.0
+
+    def test_feature_names_match(self):
+        """Test feature_names property returns correct names."""
+        extractor = BoxFeatureExtractor()
+
+        names = extractor.feature_names
+        assert names == BOX_FEATURE_NAMES
+        assert len(names) == 20
+
+        # Verify it returns a copy (immutable)
+        names.append("extra")
+        assert "extra" not in extractor.feature_names
+
+    def test_reset_session(self):
+        """Test reset_session initializes state correctly."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(
+            first_open=100.0,
+            first_high=105.0,
+            first_low=95.0,
+            first_volume=1000.0,
+        )
+
+        assert extractor.box_state.session_high == 105.0
+        assert extractor.box_state.session_low == 95.0
+        assert extractor.box_state.session_open == 100.0
+        assert extractor.box_state.bar_count == 1
+        assert extractor.session_avg_volume == 1000.0
+
+    def test_update_expands_box(self):
+        """Test update expands box boundaries correctly."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 105.0, 95.0, 1000.0)
+
+        # Update with higher high
+        extractor.update(high=110.0, low=100.0, close=108.0, volume=1200.0)
+
+        assert extractor.box_state.session_high == 110.0
+        assert extractor.box_state.session_low == 95.0
+        assert extractor.box_state.bar_count == 2
+
+    def test_warmup_tracking(self):
+        """Test is_warm property tracks warmup correctly."""
+        extractor = BoxFeatureExtractor(warmup_bars=5)
+        extractor.reset_session(100.0, 105.0, 95.0)
+
+        assert not extractor.is_warm
+
+        # Add 4 more bars (total 5 = warmup)
+        for i in range(4):
+            extractor.update(high=105.0, low=95.0, close=100.0)
+
+        assert extractor.is_warm
+
+    def test_extract_features_returns_all_features(self):
+        """Test extract_features returns all 20 features."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0, 1000.0)
+
+        features = extractor.extract_features(
+            open_price=100.0,
+            high=108.0,
+            low=95.0,
+            close=105.0,
+            volume=1500.0,
+            atr=5.0,
+        )
+
+        assert len(features) == 20
+        for name in BOX_FEATURE_NAMES:
+            assert name in features
+
+    def test_extract_features_bounded(self):
+        """Test all extracted features are within expected bounds."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0, 1000.0)
+
+        # Add some bars to get meaningful state
+        for _ in range(10):
+            extractor.update(high=108.0, low=92.0, close=100.0, volume=1000.0)
+
+        features = extractor.extract_features(
+            open_price=100.0,
+            high=108.0,
+            low=92.0,
+            close=105.0,
+            volume=1500.0,
+            atr=5.0,
+        )
+
+        # Check bounds for each feature type
+        assert 0.0 <= features["box_height_atr_ratio"] <= 1.0
+        assert 0.0 <= features["session_progress"] <= 1.0
+        assert -1.0 <= features["dist_to_high_norm"] <= 1.0
+        assert -1.0 <= features["dist_to_mid_norm"] <= 1.0
+        assert -1.0 <= features["dist_to_low_norm"] <= 1.0
+        assert -1.0 <= features["zone_position"] <= 1.0
+        assert features["at_high"] in [0.0, 1.0]
+        assert features["at_mid"] in [0.0, 1.0]
+        assert features["at_low"] in [0.0, 1.0]
+        assert 0.0 <= features["high_touch_norm"] <= 1.0
+        assert 0.0 <= features["mid_touch_norm"] <= 1.0
+        assert 0.0 <= features["low_touch_norm"] <= 1.0
+        assert 0.0 <= features["bars_since_high_touch_norm"] <= 1.0
+        assert 0.0 <= features["bars_since_low_touch_norm"] <= 1.0
+        assert features["broke_high"] in [0.0, 1.0]
+        assert features["broke_low"] in [0.0, 1.0]
+        assert features["breakout_direction"] in [-1.0, 0.0, 1.0]
+        assert -1.0 <= features["rejection_wick_ratio"] <= 1.0
+        assert 0.0 <= features["volume_vs_session_avg_norm"] <= 1.0
+        assert 0.0 <= features["approach_bars_norm"] <= 1.0
+
+    def test_extract_feature_array_shape(self):
+        """Test extract_feature_array returns correct shape."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0)
+
+        arr = extractor.extract_feature_array(
+            open_price=100.0,
+            high=108.0,
+            low=92.0,
+            close=105.0,
+            volume=1000.0,
+            atr=5.0,
+        )
+
+        assert isinstance(arr, np.ndarray)
+        assert arr.shape == (20,)
+        assert arr.dtype == np.float32
+
+    def test_extract_feature_array_matches_dict(self):
+        """Test feature array matches dictionary values."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0, 1000.0)
+
+        features_dict = extractor.extract_features(
+            open_price=100.0,
+            high=108.0,
+            low=92.0,
+            close=105.0,
+            volume=1500.0,
+            atr=5.0,
+        )
+        features_arr = extractor.extract_feature_array(
+            open_price=100.0,
+            high=108.0,
+            low=92.0,
+            close=105.0,
+            volume=1500.0,
+            atr=5.0,
+        )
+
+        for i, name in enumerate(BOX_FEATURE_NAMES):
+            assert abs(features_arr[i] - features_dict[name]) < 1e-6
+
+    def test_zone_position_encoding(self):
+        """Test zone_position encodes zones correctly."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0)
+
+        # Test price in UPPER zone
+        extractor.update(high=108.0, low=102.0, close=106.0)  # Above mid (100)
+        features = extractor.extract_features(100.0, 108.0, 102.0, 106.0, 1000.0, 5.0)
+        assert features["zone_position"] == 0.33  # UPPER zone
+
+        # Reset and test LOWER zone
+        extractor.reset_session(100.0, 110.0, 90.0)
+        extractor.update(high=98.0, low=92.0, close=94.0)  # Below mid
+        features = extractor.extract_features(92.0, 98.0, 92.0, 94.0, 1000.0, 5.0)
+        assert features["zone_position"] == -0.33  # LOWER zone
+
+    def test_breakout_features(self):
+        """Test breakout features track correctly."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0)
+
+        # Initial state - no breakout
+        features = extractor.extract_features(100.0, 105.0, 95.0, 100.0, 1000.0, 5.0)
+        assert features["broke_high"] == 0.0
+        assert features["broke_low"] == 0.0
+        assert features["breakout_direction"] == 0.0
+
+        # Break above high
+        extractor.update(high=115.0, low=105.0, close=112.0)
+        features = extractor.extract_features(105.0, 115.0, 105.0, 112.0, 1000.0, 5.0)
+        assert features["broke_high"] == 1.0
+        assert features["broke_low"] == 0.0
+        assert features["breakout_direction"] == 1.0
+
+    def test_volume_tracking(self):
+        """Test session average volume tracking."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0, first_volume=1000.0)
+
+        # Add more volume
+        extractor.update(high=108.0, low=92.0, close=100.0, volume=2000.0)
+        extractor.update(high=108.0, low=92.0, close=100.0, volume=3000.0)
+
+        # Average should be (1000 + 2000 + 3000) / 3 = 2000
+        assert extractor.session_avg_volume == 2000.0
+
+    def test_serialization_round_trip(self):
+        """Test to_dict and from_dict preserve state."""
+        extractor = BoxFeatureExtractor(warmup_bars=20, touch_tolerance_pct=0.002)
+        extractor.reset_session(100.0, 110.0, 90.0, 1000.0)
+
+        # Add some state
+        for i in range(5):
+            extractor.update(high=108.0, low=92.0, close=100.0, volume=1000.0 + i * 100)
+
+        # Serialize
+        data = extractor.to_dict()
+
+        # Deserialize
+        restored = BoxFeatureExtractor.from_dict(data)
+
+        # Verify state matches
+        assert restored.warmup_bars == extractor.warmup_bars
+        assert restored.touch_tolerance_pct == extractor.touch_tolerance_pct
+        assert restored.box_state.bar_count == extractor.box_state.bar_count
+        assert restored.box_state.session_high == extractor.box_state.session_high
+        assert restored._zone_entry_bar == extractor._zone_entry_bar
+        assert restored.session_avg_volume == extractor.session_avg_volume
+
+    def test_invalid_state_returns_zeros(self):
+        """Test extract_features returns zeros before reset_session."""
+        extractor = BoxFeatureExtractor()
+
+        # Before any reset, state is invalid
+        features = extractor.extract_features(100.0, 105.0, 95.0, 100.0, 1000.0, 5.0)
+
+        # All features should be 0.0
+        for name in BOX_FEATURE_NAMES:
+            assert features[name] == 0.0
+
+    def test_repr_string(self):
+        """Test __repr__ returns informative string."""
+        extractor = BoxFeatureExtractor(warmup_bars=10)
+        extractor.reset_session(100.0, 110.0, 90.0)
+
+        repr_str = repr(extractor)
+        assert "BoxFeatureExtractor" in repr_str
+        assert "warm=" in repr_str
+        assert "bars=" in repr_str
+        assert "features=20" in repr_str
+
+    def test_numerical_stability_zero_atr(self):
+        """Test extract_features handles zero ATR gracefully."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0)
+
+        # ATR = 0 should not cause division by zero
+        features = extractor.extract_features(100.0, 105.0, 95.0, 100.0, 1000.0, atr=0.0)
+
+        assert features["box_height_atr_ratio"] == 0.0
+        assert not np.isnan(features["box_height_atr_ratio"])
+
+    def test_numerical_stability_zero_box_height(self):
+        """Test extract_features handles zero box height gracefully."""
+        extractor = BoxFeatureExtractor()
+        # Session with same high and low
+        extractor.reset_session(100.0, 100.0, 100.0)
+
+        features = extractor.extract_features(100.0, 100.0, 100.0, 100.0, 1000.0, 5.0)
+
+        # Distance features should be 0, not NaN
+        assert features["dist_to_high_norm"] == 0.0
+        assert features["dist_to_mid_norm"] == 0.0
+        assert features["dist_to_low_norm"] == 0.0
+        assert not np.isnan(features["dist_to_high_norm"])
+
+    def test_touch_count_features(self):
+        """Test touch count normalization."""
+        # Use larger tolerance (5% of box height)
+        extractor = BoxFeatureExtractor(touch_tolerance_pct=0.05)  # 5% tolerance
+        extractor.reset_session(100.0, 110.0, 90.0)  # box_height = 20
+
+        # Touch the high level multiple times
+        # With 5% tolerance and height=20, tolerance = 1.0
+        # Close of 109.5 is 0.5 away from 110, within tolerance
+        for _ in range(3):
+            extractor.update(high=110.0, low=108.0, close=109.5)  # At high (0.5 < 1.0 tolerance)
+            extractor.update(high=105.0, low=100.0, close=102.0)  # Move away
+
+        features = extractor.extract_features(100.0, 105.0, 100.0, 102.0, 1000.0, 5.0)
+
+        # Should have touched high at least once
+        assert features["high_touch_norm"] > 0.0
+        assert features["high_touch_norm"] <= 1.0
+
+    def test_approach_bars_feature(self):
+        """Test approach_bars_norm tracks zone duration."""
+        extractor = BoxFeatureExtractor()
+        extractor.reset_session(100.0, 110.0, 90.0)
+
+        # Stay in same zone for multiple bars
+        for _ in range(10):
+            extractor.update(high=105.0, low=101.0, close=103.0)  # UPPER zone
+
+        features = extractor.extract_features(101.0, 105.0, 101.0, 103.0, 1000.0, 5.0)
+
+        # Should show time in zone
+        assert features["approach_bars_norm"] > 0.0

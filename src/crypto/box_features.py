@@ -629,3 +629,435 @@ def calculate_validation_signals(
         current_bar=current_bar,
         zone_entry_bar=zone_entry_bar,
     )
+
+
+# =============================================================================
+# BOX FEATURE EXTRACTOR
+# =============================================================================
+
+# Feature names for observation space
+BOX_FEATURE_NAMES = [
+    # Box dimensions (2)
+    "box_height_atr_ratio",
+    "session_progress",
+    # Distance features (3)
+    "dist_to_high_norm",
+    "dist_to_mid_norm",
+    "dist_to_low_norm",
+    # Zone position (4)
+    "zone_position",  # Continuous [-1, 1]
+    "at_high",  # Binary
+    "at_mid",  # Binary
+    "at_low",  # Binary
+    # Touch counts (3)
+    "high_touch_norm",
+    "mid_touch_norm",
+    "low_touch_norm",
+    # Touch recency (2)
+    "bars_since_high_touch_norm",
+    "bars_since_low_touch_norm",
+    # Breakout state (3)
+    "broke_high",
+    "broke_low",
+    "breakout_direction",
+    # Validation signals (3)
+    "rejection_wick_ratio",
+    "volume_vs_session_avg_norm",
+    "approach_bars_norm",
+]
+
+
+class BoxFeatureExtractor:
+    """
+    Extract box strategy features for RL observation space.
+
+    This class combines BoxState tracking with feature extraction, producing
+    a fixed-size feature vector suitable for neural network input.
+
+    Features are normalized to bounded ranges:
+    - Binary features: {0, 1}
+    - Ratio features: [0, 1] or [-1, 1]
+    - All features numerically stable (eps-safe divisions)
+
+    Composition Pattern:
+        This class does NOT inherit from FeatureExtractor. It's designed to
+        be composed with the existing FeatureExtractor, appending box features
+        to the existing feature set.
+
+    Attributes:
+        box_state: BoxState instance tracking session state
+        validation_signals: ValidationSignals for candle analysis
+        warmup_bars: Bars needed before features are valid
+        touch_tolerance_pct: Tolerance for "at level" detection
+        expected_session_bars: Expected bars per session (for progress normalization)
+
+    Usage:
+        extractor = BoxFeatureExtractor(warmup_bars=30)
+        extractor.reset_session(open=100, high=105, low=95)
+
+        for bar in bars:
+            extractor.update(bar)
+            if extractor.is_warm:
+                features = extractor.extract_features(bar, atr=1.5)
+    """
+
+    # Constants for normalization
+    EPS: float = 1e-8
+    MAX_HEIGHT_ATR_RATIO: float = 5.0
+    MAX_APPROACH_BARS: int = 50
+    VOLUME_RATIO_MIN: float = 0.1
+    VOLUME_RATIO_MAX: float = 5.0
+
+    def __init__(
+        self,
+        warmup_bars: int = 30,
+        touch_tolerance_pct: float = 0.001,
+        expected_session_bars: int = 96,  # 96 bars for 15m candles in 24h
+    ):
+        """
+        Initialize BoxFeatureExtractor.
+
+        Args:
+            warmup_bars: Bars needed before features are valid
+            touch_tolerance_pct: Tolerance for "at level" detection (0.1% default)
+            expected_session_bars: Expected bars per session for progress normalization
+        """
+        self.warmup_bars = warmup_bars
+        self.touch_tolerance_pct = touch_tolerance_pct
+        self.expected_session_bars = expected_session_bars
+
+        # State tracking
+        self.box_state = BoxState()
+        self.validation_signals = ValidationSignals()
+
+        # Zone entry tracking for approach_bars
+        self._zone_entry_bar: int = -1
+        self._last_zone: Zone = Zone.LOWER
+
+        # Session volume tracking for volume_vs_session_avg
+        self._session_volume_sum: float = 0.0
+        self._session_volume_count: int = 0
+
+    @property
+    def feature_names(self) -> list:
+        """Get list of feature names."""
+        return BOX_FEATURE_NAMES.copy()
+
+    @property
+    def feature_dim(self) -> int:
+        """Get number of features."""
+        return len(BOX_FEATURE_NAMES)
+
+    @property
+    def is_warm(self) -> bool:
+        """Check if warmup period is complete."""
+        return self.box_state.bar_count >= self.warmup_bars
+
+    @property
+    def session_avg_volume(self) -> float:
+        """Get session average volume."""
+        if self._session_volume_count == 0:
+            return 0.0
+        return self._session_volume_sum / self._session_volume_count
+
+    def reset_session(
+        self,
+        first_open: float,
+        first_high: float,
+        first_low: float,
+        first_volume: float = 0.0,
+    ) -> None:
+        """
+        Reset state for new trading session.
+
+        Called at session boundary (e.g., UTC midnight) with first bar data.
+
+        Args:
+            first_open: Open price of first bar
+            first_high: High of first bar
+            first_low: Low of first bar
+            first_volume: Volume of first bar (optional)
+        """
+        self.box_state.reset(first_open, first_high, first_low)
+
+        # Reset zone tracking
+        self._zone_entry_bar = 1
+        self._last_zone = Zone.LOWER
+
+        # Reset volume tracking
+        self._session_volume_sum = first_volume
+        self._session_volume_count = 1 if first_volume > 0 else 0
+
+    def update(
+        self,
+        high: float,
+        low: float,
+        close: float,
+        volume: float = 0.0,
+    ) -> Zone:
+        """
+        Update state with new bar data.
+
+        Args:
+            high: Bar's high price
+            low: Bar's low price
+            close: Bar's close price
+            volume: Bar's volume (optional)
+
+        Returns:
+            Current zone classification
+        """
+        # Update box state
+        current_zone = self.box_state.update(
+            high=high,
+            low=low,
+            close=close,
+            tolerance_pct=self.touch_tolerance_pct,
+        )
+
+        # Track zone entry for approach_bars
+        if current_zone != self._last_zone:
+            self._zone_entry_bar = self.box_state.bar_count
+            self._last_zone = current_zone
+
+        # Update volume tracking
+        if volume > 0:
+            self._session_volume_sum += volume
+            self._session_volume_count += 1
+
+        return current_zone
+
+    def extract_features(
+        self,
+        open_price: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        atr: float,
+    ) -> Dict[str, float]:
+        """
+        Extract all box features for current bar.
+
+        Args:
+            open_price: Bar's open price
+            high: Bar's high price
+            low: Bar's low price
+            close: Bar's close price
+            volume: Bar's volume
+            atr: Current ATR value (for box_height_atr_ratio)
+
+        Returns:
+            Dictionary mapping feature names to values
+        """
+        features = {}
+        state = self.box_state
+
+        # Handle invalid state (before first bar)
+        if not state.is_valid:
+            return {name: 0.0 for name in BOX_FEATURE_NAMES}
+
+        box_height = state.box_height
+        box_mid = state.box_mid
+
+        # ===== BOX DIMENSIONS (2) =====
+        # box_height_atr_ratio: How wide is the box relative to volatility
+        if atr > self.EPS:
+            height_atr = box_height / atr
+        else:
+            height_atr = 0.0
+        features["box_height_atr_ratio"] = float(np.clip(
+            height_atr / self.MAX_HEIGHT_ATR_RATIO, 0.0, 1.0
+        ))
+
+        # session_progress: How far into the session [0, 1]
+        features["session_progress"] = float(np.clip(
+            state.bar_count / self.expected_session_bars, 0.0, 1.0
+        ))
+
+        # ===== DISTANCE FEATURES (3) =====
+        # All distances normalized by box height, clipped to [-1, 1]
+        if box_height > self.EPS:
+            dist_to_high = (close - state.session_high) / box_height
+            dist_to_mid = (close - box_mid) / box_height
+            dist_to_low = (close - state.session_low) / box_height
+        else:
+            dist_to_high = 0.0
+            dist_to_mid = 0.0
+            dist_to_low = 0.0
+
+        features["dist_to_high_norm"] = float(np.clip(dist_to_high, -1.0, 1.0))
+        features["dist_to_mid_norm"] = float(np.clip(dist_to_mid, -1.0, 1.0))
+        features["dist_to_low_norm"] = float(np.clip(dist_to_low, -1.0, 1.0))
+
+        # ===== ZONE POSITION (4) =====
+        # Continuous zone encoding: -1 (below_box) to +1 (above_box)
+        zone = state.last_zone
+        zone_map = {
+            Zone.BELOW_BOX: -1.0,
+            Zone.AT_LOW: -0.67,
+            Zone.LOWER: -0.33,
+            Zone.AT_MID: 0.0,
+            Zone.UPPER: 0.33,
+            Zone.AT_HIGH: 0.67,
+            Zone.ABOVE_BOX: 1.0,
+        }
+        features["zone_position"] = zone_map.get(zone, 0.0)
+
+        # Binary "at level" flags
+        features["at_high"] = 1.0 if zone == Zone.AT_HIGH else 0.0
+        features["at_mid"] = 1.0 if zone == Zone.AT_MID else 0.0
+        features["at_low"] = 1.0 if zone == Zone.AT_LOW else 0.0
+
+        # ===== TOUCH COUNTS (3) =====
+        max_touches = state.MAX_TOUCH_COUNT
+        features["high_touch_norm"] = state.high_touch_count / max_touches
+        features["mid_touch_norm"] = state.mid_touch_count / max_touches
+        features["low_touch_norm"] = state.low_touch_count / max_touches
+
+        # ===== TOUCH RECENCY (2) =====
+        # Normalize bars since touch: 0 = just touched, 1 = long ago
+        max_recency = 50  # Bars for max recency
+        bars_since_high = state.bars_since_high_touch()
+        bars_since_low = state.bars_since_low_touch()
+
+        if bars_since_high < 0:
+            features["bars_since_high_touch_norm"] = 1.0  # Never touched
+        else:
+            features["bars_since_high_touch_norm"] = float(np.clip(
+                bars_since_high / max_recency, 0.0, 1.0
+            ))
+
+        if bars_since_low < 0:
+            features["bars_since_low_touch_norm"] = 1.0  # Never touched
+        else:
+            features["bars_since_low_touch_norm"] = float(np.clip(
+                bars_since_low / max_recency, 0.0, 1.0
+            ))
+
+        # ===== BREAKOUT STATE (3) =====
+        features["broke_high"] = 1.0 if state.broke_high else 0.0
+        features["broke_low"] = 1.0 if state.broke_low else 0.0
+
+        # Breakout direction: -1 (broke low only), 0 (neither/both), +1 (broke high only)
+        if state.broke_high and not state.broke_low:
+            features["breakout_direction"] = 1.0
+        elif state.broke_low and not state.broke_high:
+            features["breakout_direction"] = -1.0
+        else:
+            features["breakout_direction"] = 0.0
+
+        # ===== VALIDATION SIGNALS (3) =====
+        signals = self.validation_signals.calculate(
+            open_price=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            session_avg_volume=self.session_avg_volume,
+            current_bar=state.bar_count,
+            zone_entry_bar=self._zone_entry_bar,
+        )
+
+        # rejection_wick_ratio: already in [-1, 1]
+        features["rejection_wick_ratio"] = signals["rejection_wick_ratio"]
+
+        # volume_vs_session_avg: rescale from [0.1, 5.0] to [0, 1]
+        vol_ratio = signals["volume_vs_session_avg"]
+        features["volume_vs_session_avg_norm"] = float(np.clip(
+            (vol_ratio - self.VOLUME_RATIO_MIN) /
+            (self.VOLUME_RATIO_MAX - self.VOLUME_RATIO_MIN),
+            0.0, 1.0
+        ))
+
+        # approach_bars: normalize to [0, 1]
+        approach = signals["approach_bars"]
+        if approach < 0:
+            features["approach_bars_norm"] = 0.0
+        else:
+            features["approach_bars_norm"] = float(np.clip(
+                approach / self.MAX_APPROACH_BARS, 0.0, 1.0
+            ))
+
+        return features
+
+    def extract_feature_array(
+        self,
+        open_price: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        atr: float,
+    ) -> np.ndarray:
+        """
+        Extract features as numpy array (for direct use in observation space).
+
+        Args:
+            open_price: Bar's open price
+            high: Bar's high price
+            low: Bar's low price
+            close: Bar's close price
+            volume: Bar's volume
+            atr: Current ATR value
+
+        Returns:
+            1D numpy array of shape (feature_dim,) with dtype float32
+        """
+        features = self.extract_features(open_price, high, low, close, volume, atr)
+        return np.array(
+            [features[name] for name in BOX_FEATURE_NAMES],
+            dtype=np.float32
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize extractor state for checkpointing.
+
+        Returns:
+            Dictionary containing all state needed to restore
+        """
+        return {
+            "box_state": self.box_state.to_dict(),
+            "validation_signals": self.validation_signals.to_dict(),
+            "zone_entry_bar": self._zone_entry_bar,
+            "last_zone": self._last_zone.value,
+            "session_volume_sum": self._session_volume_sum,
+            "session_volume_count": self._session_volume_count,
+            "warmup_bars": self.warmup_bars,
+            "touch_tolerance_pct": self.touch_tolerance_pct,
+            "expected_session_bars": self.expected_session_bars,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BoxFeatureExtractor":
+        """
+        Restore extractor from checkpoint.
+
+        Args:
+            data: Dictionary from to_dict()
+
+        Returns:
+            Restored BoxFeatureExtractor instance
+        """
+        extractor = cls(
+            warmup_bars=data.get("warmup_bars", 30),
+            touch_tolerance_pct=data.get("touch_tolerance_pct", 0.001),
+            expected_session_bars=data.get("expected_session_bars", 96),
+        )
+        extractor.box_state = BoxState.from_dict(data.get("box_state", {}))
+        extractor.validation_signals = ValidationSignals.from_dict(
+            data.get("validation_signals", {})
+        )
+        extractor._zone_entry_bar = data.get("zone_entry_bar", -1)
+        extractor._last_zone = Zone(data.get("last_zone", Zone.LOWER.value))
+        extractor._session_volume_sum = data.get("session_volume_sum", 0.0)
+        extractor._session_volume_count = data.get("session_volume_count", 0)
+        return extractor
+
+    def __repr__(self) -> str:
+        """Concise representation for debugging."""
+        return (
+            f"BoxFeatureExtractor(warm={self.is_warm}, bars={self.box_state.bar_count}, "
+            f"zone={self.box_state.last_zone.value}, features={self.feature_dim})"
+        )
