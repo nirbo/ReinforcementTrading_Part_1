@@ -201,14 +201,16 @@ LINK/USDT:USDT
 ReinforcementTrading_Part_1/
 ├── configs/
 │   ├── default.yaml          # Default configuration (no box features)
-│   └── box_features.yaml     # Box features enabled config
+│   ├── box_features.yaml     # Box + base features combined config
+│   └── box_only.yaml         # Standalone box-only config (no base features)
 ├── data/
 │   ├── raw/                  # Raw OHLCV parquet files
 │   └── processed/            # Processed feature data
 ├── models/                   # Trained models (gitignored)
 ├── scripts/
-│   ├── train_baseline.py     # Train without box features
-│   ├── train_box_features.py # Train with box features
+│   ├── train_baseline.py     # Train without box features (76 base)
+│   ├── train_box_features.py # Train with combined features (76 base + 20 box)
+│   ├── train_box_only.py     # Train standalone box strategy (20 box only)
 │   └── train_sequential.sh   # Run both trainings sequentially
 ├── src/
 │   └── crypto/
@@ -797,14 +799,20 @@ These levels are tracked dynamically and reset at UTC midnight (session boundary
 
 ### Configuration
 
-Enable box features in your config YAML:
+Three training modes are available via config:
 
 ```yaml
-# configs/box_features.yaml
+# configs/box_features.yaml - Combined mode (76 base + 20 box = 96 features)
 box_features:
-  use_box_features: true        # Enable box features (adds 20 to observation)
+  use_base_features: true       # Enable 76 base indicator features
+  use_box_features: true        # Enable 20 box features
   box_warmup_bars: 30           # Bars before features are valid
   box_touch_tolerance_pct: 0.001  # 0.1% tolerance for touch detection
+
+# configs/box_only.yaml - Standalone box mode (20 features only)
+box_features:
+  use_base_features: false      # DISABLE base features
+  use_box_features: true        # Enable 20 box features
 ```
 
 ### Observation Space Impact
@@ -812,6 +820,7 @@ box_features:
 | Config | Base Features | Box Features | Position | Total |
 |--------|---------------|--------------|----------|-------|
 | `default.yaml` | 76 | 0 | 3 | 79 |
+| `box_only.yaml` | 0 | 20 | 3 | 23 |
 | `box_features.yaml` | 76 | 20 | 3 | 99 |
 
 ### Session Boundaries
