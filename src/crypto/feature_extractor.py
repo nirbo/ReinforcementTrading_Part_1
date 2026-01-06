@@ -10,14 +10,15 @@ State vectors are designed for RL agent consumption with:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from src.crypto.config import CryptoConfig, IndicatorConfig, load_config
+from src.crypto.config import CryptoConfig, load_config
 from src.crypto.indicators import compute_all_indicators
+from src.crypto.box_features import BoxFeatureExtractor, BOX_FEATURE_NAMES
 
 
 @dataclass
@@ -157,6 +158,11 @@ class FeatureExtractor:
     - Scale-invariant (ratios, percentages)
     - Bounded (clipped to reasonable ranges)
     - Normalized (optionally to [0, 1] or [-1, 1])
+
+    Box Features Integration:
+        When use_box_features=True (from config.box_features.use_box_features),
+        this extractor includes 20 additional features from BoxFeatureExtractor.
+        These track intraday session high/low/mid levels and interactions.
     """
 
     def __init__(
@@ -170,18 +176,128 @@ class FeatureExtractor:
         self.include_htf = include_htf
         self.indicator_config = self.config.indicators.model_dump()
 
-        # Compute feature dimension
+        # Compute base feature dimension
         self._base_features = self._get_feature_names()
-        self.feature_dim = len(self._base_features)
+        self._base_feature_dim = len(self._base_features)
+
+        # Box features integration (optional, controlled by config)
+        self.use_box_features = self.config.box_features.use_box_features
+        self._box_extractor: Optional[BoxFeatureExtractor] = None
+
+        if self.use_box_features:
+            self._box_extractor = BoxFeatureExtractor(
+                warmup_bars=self.config.box_features.box_warmup_bars,
+                touch_tolerance_pct=self.config.box_features.box_touch_tolerance_pct,
+            )
+            self._box_feature_dim = self._box_extractor.feature_dim
+        else:
+            self._box_feature_dim = 0
+
+        # Total feature dimension
+        self.feature_dim = self._base_feature_dim + self._box_feature_dim
 
     def _get_feature_names(self) -> List[str]:
-        """Get list of feature names."""
+        """Get list of base feature names."""
         return [spec.name for spec in FEATURE_SPECS]
+
+    def get_all_feature_names(self) -> List[str]:
+        """
+        Get list of all feature names including box features.
+
+        Returns:
+            List of feature names (base + box if enabled)
+        """
+        names = self._base_features.copy()
+        if self.use_box_features:
+            names.extend(BOX_FEATURE_NAMES)
+        return names
 
     @property
     def observation_shape(self) -> Tuple[int, int]:
         """Shape of observation: (window_size, feature_dim)."""
         return (self.window_size, self.feature_dim)
+
+    @property
+    def box_extractor(self) -> Optional[BoxFeatureExtractor]:
+        """Get the box feature extractor (None if disabled)."""
+        return self._box_extractor
+
+    def reset_box_session(
+        self,
+        first_open: float,
+        first_high: float,
+        first_low: float,
+        first_volume: float = 0.0,
+    ) -> None:
+        """
+        Reset box state for new trading session.
+
+        Called at session boundary (e.g., UTC midnight) with first bar data.
+        No-op if use_box_features is False.
+
+        Args:
+            first_open: Open price of first bar
+            first_high: High of first bar
+            first_low: Low of first bar
+            first_volume: Volume of first bar (optional)
+        """
+        if self._box_extractor is not None:
+            self._box_extractor.reset_session(
+                first_open, first_high, first_low, first_volume
+            )
+
+    def update_box_state(
+        self,
+        high: float,
+        low: float,
+        close: float,
+        volume: float = 0.0,
+    ) -> None:
+        """
+        Update box state with new bar data.
+
+        No-op if use_box_features is False.
+
+        Args:
+            high: Bar's high price
+            low: Bar's low price
+            close: Bar's close price
+            volume: Bar's volume (optional)
+        """
+        if self._box_extractor is not None:
+            self._box_extractor.update(high, low, close, volume)
+
+    def get_box_features(
+        self,
+        open_price: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        atr: float,
+    ) -> np.ndarray:
+        """
+        Extract box features for current bar as numpy array.
+
+        Returns zeros if use_box_features is False.
+
+        Args:
+            open_price: Bar's open price
+            high: Bar's high price
+            low: Bar's low price
+            close: Bar's close price
+            volume: Bar's volume
+            atr: Current ATR value
+
+        Returns:
+            1D numpy array of shape (box_feature_dim,) or (0,) if disabled
+        """
+        if self._box_extractor is None:
+            return np.array([], dtype=np.float32)
+
+        return self._box_extractor.extract_feature_array(
+            open_price, high, low, close, volume, atr
+        )
 
     def extract_features(
         self,
